@@ -1,0 +1,114 @@
+/* pn study — design tokens (direction 2a: "Ledger", amber accent)
+   Dark is the default; light follows prefers-color-scheme or [data-theme="light"] on <html>. */
+
+@import url("https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap");
+
+:root {
+  color-scheme: dark;
+
+  /* surfaces (warm charcoal) */
+  --bg-0: #151412;   /* page */
+  --bg-1: #171614;   /* side column / drawer */
+  --bg-2: #1c1b18;   /* plates, buttons, cards, table disc */
+  --bg-3: #221f1b;   /* pair cells, raised rows */
+  --line: #2a2824;
+  --line-2: #3a3733;
+
+  /* ink */
+  --ink: #ece9e1;
+  --ink-2: #a7a39a;
+  --ink-3: #6f6c65;
+  --ink-4: #55524c;  /* folded seats, disabled */
+
+  /* accent (hero, active nav, RNG, best action) */
+  --accent: oklch(78% 0.12 75);
+  --accent-ink: #151412;        /* text on accent */
+  --accent-soft: oklch(78% 0.12 75 / 0.14);
+
+  /* semantics */
+  --good: #6cc48f;   /* grade best, matched RNG, positive net */
+  --warn: #e0b04f;   /* grade mixed, blunder count */
+  --bad:  #f0715f;   /* grade blunder */
+  --hi: #f0715f;  --hi-bg: rgb(240 113 95 / 0.13);   /* above GTO (stat tables) */
+  --lo: #6fa8f0;  --lo-bg: rgb(111 168 240 / 0.13);  /* below GTO */
+
+  /* action colours — GTO Wizard mapping, do not change (grid.js owns the JS copy) */
+  --act-fold: #4a86d9;
+  --act-check: #3fa66a;
+  --act-call: #3fa66a;
+  --act-raise-1: #e8705f;
+  --act-raise-2: #d4483f;
+  --act-raise-3: #b3302f;
+  --act-raise-4: #922326;
+  --act-allin: #6e1220;
+
+  /* cards */
+  --card-bg: #f6f1e3; --card-ink: #1b1b1b;
+  --suit-s: #1b1b1b; --suit-h: #c8302b; --suit-d: #1f62b8; --suit-c: #23824b; /* on card face */
+  --suit-s-ink: #ece9e1; --suit-h-ink: #ef6a5a; --suit-d-ink: #6fa8f0; --suit-c-ink: #6cc48f; /* on dark surfaces (deck picker) */
+  --card-back: #2a2824; --card-back-line: #4a4640;
+
+  /* grid cells */
+  --cell-bg: #1c1b18;
+  --cell-pair: #221f1b;
+  --cell-grout: #2a2824;
+
+  /* type */
+  --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Space Mono", ui-monospace, Menlo, monospace;   /* all numerals, labels, keys */
+  --text-2xs: 0.625rem;  /* 10px mono labels */
+  --text-xs: 0.6875rem;  /* 11px mono kickers */
+  --text-sm: 0.8125rem;  /* 13px body-secondary */
+  --text-base: 0.875rem; /* 14px body */
+  --text-md: 0.9375rem;  /* 15px button labels */
+  --text-lg: 1.25rem;    /* 20px page title */
+  --text-xl: 1.625rem;   /* 26px verdict / RNG */
+  --text-num: 1.75rem;   /* 28px big numbers */
+  --track: 0.08em;       /* letter-spacing for uppercase mono labels */
+
+  /* space, shape, motion */
+  --s1: 0.25rem; --s2: 0.5rem; --s3: 0.75rem; --s4: 1rem; --s5: 1.5rem; --s6: 2.25rem; --s7: 3.5rem;
+  --gutter: clamp(16px, 2.5vw, 28px);
+  --radius: 3px;       /* everything; no large radii in this system */
+  --radius-card: 4px;  /* playing cards only */
+  --rule: 3px;         /* action colour rule on buttons */
+  --shadow-card: 0 6px 16px -6px rgb(0 0 0 / 0.8);
+  --shadow-disc: inset 0 0 0 1px var(--line), 0 30px 60px -40px rgb(0 0 0 / 0.9);
+  --focus: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--accent);
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur: 160ms;
+
+  /* layout */
+  --side-w: 384px;     /* Train feedback column / Strategy right column at ≥ 1100px */
+  --table-max: 820px;
+  --grid-max: 640px;
+}
+
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { color-scheme: light;
+  --bg-0: #f4f2ed; --bg-1: #faf9f6; --bg-2: #ffffff; --bg-3: #eeebe4;
+  --line: #dcd8ce; --line-2: #c8c3b6;
+  --ink: #1b1a17; --ink-2: #4f4c45; --ink-3: #767269; --ink-4: #9a968c;
+  --accent: oklch(55% 0.12 75); --accent-ink: #ffffff; --accent-soft: oklch(55% 0.12 75 / 0.12);
+  --good: #23824b; --warn: #9a6a00; --bad: #c0392b;
+  --hi: #c0392b; --hi-bg: rgb(192 57 43 / 0.1); --lo: #1f62b8; --lo-bg: rgb(31 98 184 / 0.1);
+  --card-bg: #ffffff; --card-back: #d6d1c4; --card-back-line: #b8b2a3;
+  --suit-s-ink: #1b1a17; --suit-h-ink: #c0392b; --suit-d-ink: #1f62b8; --suit-c-ink: #23824b;
+  --cell-bg: #ffffff; --cell-pair: #f1eee7; --cell-grout: #dcd8ce;
+  --shadow-card: 0 6px 16px -8px rgb(40 30 10 / 0.5);
+  --shadow-disc: inset 0 0 0 1px var(--line), 0 20px 40px -30px rgb(40 30 10 / 0.4);
+  --focus: 0 0 0 2px var(--bg-1), 0 0 0 4px var(--accent);
+} }
+:root[data-theme="light"] { color-scheme: light;
+  --bg-0: #f4f2ed; --bg-1: #faf9f6; --bg-2: #ffffff; --bg-3: #eeebe4;
+  --line: #dcd8ce; --line-2: #c8c3b6;
+  --ink: #1b1a17; --ink-2: #4f4c45; --ink-3: #767269; --ink-4: #9a968c;
+  --accent: oklch(55% 0.12 75); --accent-ink: #ffffff; --accent-soft: oklch(55% 0.12 75 / 0.12);
+  --good: #23824b; --warn: #9a6a00; --bad: #c0392b;
+  --hi: #c0392b; --hi-bg: rgb(192 57 43 / 0.1); --lo: #1f62b8; --lo-bg: rgb(31 98 184 / 0.1);
+  --card-bg: #ffffff; --card-back: #d6d1c4; --card-back-line: #b8b2a3;
+  --suit-s-ink: #1b1a17; --suit-h-ink: #c0392b; --suit-d-ink: #1f62b8; --suit-c-ink: #23824b;
+  --cell-bg: #ffffff; --cell-pair: #f1eee7; --cell-grout: #dcd8ce;
+  --shadow-card: 0 6px 16px -8px rgb(40 30 10 / 0.5);
+  --shadow-disc: inset 0 0 0 1px var(--line), 0 20px 40px -30px rgb(40 30 10 / 0.4);
+  --focus: 0 0 0 2px var(--bg-1), 0 0 0 4px var(--accent);
+}

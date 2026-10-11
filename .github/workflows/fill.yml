@@ -1,0 +1,90 @@
+# Sharded `pn library fill` on GitHub Actions (public repo: free 4-vCPU runners, 20 at a time, 6 h each).
+# Private inputs (config/ charts, the solved cache) arrive as an encrypted release asset `seed`
+# (openssl, secret FILL_KEY); each shard uploads its new documents as an encrypted artifact.
+# Driven from the private repo by tools/gha_fill.sh (export | seed | start | status | pull).
+name: fill
+on:
+  workflow_dispatch:
+    inputs:
+      total:
+        description: shards (each job solves every total-th item of the order)
+        default: "60"
+      minutes:
+        description: solve minutes per shard before packing up (job limit is 360)
+        default: "330"
+      args:
+        description: pn library fill arguments
+        default: "--configs 0 --flops 50 --pots srp --pots 3bp --pots 4bp+ --accuracy 1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shards: ${{ steps.m.outputs.shards }}
+    steps:
+      - id: m
+        run: echo "shards=[$(seq -s, 0 $(( ${{ inputs.total }} - 1 )))]" >> "$GITHUB_OUTPUT"
+
+  fill:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.shards) }}
+    env:
+      FILL_KEY: ${{ secrets.FILL_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: solver (cached build)
+        id: solver
+        uses: actions/cache@v4
+        with:
+          path: third_party/texassolver/build/console_solver
+          key: solver-${{ runner.os }}-${{ hashFiles('third_party/texassolver/src/**', 'third_party/texassolver/include/**', 'third_party/texassolver/CMakeLists.txt') }}
+      - name: build solver
+        if: steps.solver.outputs.cache-hit != 'true'
+        run: |
+          cd third_party/texassolver && mkdir -p build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 > /dev/null
+          make -j"$(nproc)" console_solver 2>&1 | tail -1
+
+      - uses: astral-sh/setup-uv@v5
+      - name: pn
+        run: cd pn && uv venv --python 3.13 -q .venv && uv pip install -q -e . --python .venv/bin/python
+
+      - name: seed (config + solved cache, encrypted release asset)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download seed -p seed.tgz.enc -R "$GITHUB_REPOSITORY"
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:FILL_KEY -in seed.tgz.enc | tar xz
+          rm seed.tgz.enc
+          mkdir -p data/solves/cache && touch .seeded
+          echo "seeded: $(ls data/solves/cache/*.json 2>/dev/null | wc -l) documents"
+
+      - name: solve
+        env:
+          OMP_WAIT_POLICY: PASSIVE
+          PN_SOLVE_CACHE: ${{ github.workspace }}/data/solves/cache
+        run: |
+          timeout ${{ inputs.minutes }}m pn/.venv/bin/pn library fill ${{ inputs.args }} \
+            --shard ${{ matrix.shard }}/${{ inputs.total }} --db data/none.sqlite | tee fill.log || true
+          echo "solved $(grep -c '^solved' fill.log) failed $(grep -c '^failed' fill.log)"
+
+      - name: pack new documents
+        run: |
+          cd data/solves/cache
+          find . -maxdepth 1 -newer ../../../.seeded \( -name '*.json' -o -name '*.toml' \) \
+            ! -name 'hu_flop_library.json' ! -name '.*' > ../../../new.txt
+          echo "$(wc -l < ../../../new.txt) new files"
+          tar cz -T ../../../new.txt | openssl enc -aes-256-cbc -pbkdf2 -pass env:FILL_KEY \
+            -out "../../../shard-${{ matrix.shard }}.tgz.enc"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}.tgz.enc
+          retention-days: 14

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pn study</title>
+  <link rel="stylesheet" href="/static/tokens.css">
+  <link rel="stylesheet" href="/static/components.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/train.css">
+  <link rel="stylesheet" href="/static/strategy.css">
+  <link rel="stylesheet" href="/static/study.css">
+  <script type="module" src="/static/js/main.js"></script>
+</head>
+<body>
+  <a class="skip" href="#app">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="/" data-link>pn study</a>
+    <nav id="main-nav" aria-label="Main navigation">
+      <a href="/train" data-link data-nav="train">Train</a>
+      <a href="/strategy" data-link data-nav="strategy">Strategy</a>
+      <a href="/hands" data-link data-nav="hands">Hands</a>
+      <a href="/players" data-link data-nav="players">Players</a>
+      <a href="/review" data-link data-nav="review">Review</a>
+    </nav>
+    <button class="menu-btn" type="button" aria-label="Menu" aria-controls="main-nav" aria-expanded="false">&equiv;</button>
+  </header>
+  <main id="app" tabindex="-1" aria-live="polite"></main>
+  <div id="tip" class="tip" role="tooltip" hidden></div>
+</body>
+</html>

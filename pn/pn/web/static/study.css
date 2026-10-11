@@ -1,0 +1,61 @@
+/* pn study — preflop navigator (/strategy, Plan 9). Reuses the tree browser's strip cards, gw grid and
+   action tiles (strategy.css); this file adds the setup row, seat states, source tag and the end panel. */
+
+.study { gap: var(--s4); }
+.study .strat-surface { background: var(--bg-0); }
+.study .main-col { gap: var(--s3); }
+
+/* setup row */
+.study-setup { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s3) var(--s5); }
+.study-setup .seg-opt { text-transform: none; letter-spacing: 0.02em; }
+.study-links { display: flex; align-items: center; gap: var(--s4); margin-left: auto; }
+.study-links .btn { min-height: 36px; }
+
+/* seat strip */
+.study-strip .ln-card { min-width: 8.5rem; }
+.st-seat .ln-act .mono { color: var(--ink-3); }
+.st-seat .ln-act.is-taken .mono, .st-seat.is-current .ln-act .mono { color: var(--ink-2); }
+.st-seat.is-current button.ln-act:hover { background: var(--accent-soft); }
+.st-seat.is-folded { opacity: 0.5; }
+.st-seat.is-folded:hover, .st-seat.is-folded:focus-within { opacity: 1; }
+.st-in { font-size: var(--text-2xs); color: var(--accent); }
+.st-wait { font: 400 var(--text-md) var(--font-mono); padding: 2px 0; }
+
+/* left: heading with the source tag */
+.study-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s3); padding-bottom: var(--s2); border-bottom: 1px solid var(--line); }
+.study-head h2 { font-size: 1.125rem; }
+.study-head .tab-count { padding-bottom: 0; }
+.src-tag {
+  padding: 2px 7px; border: 1px solid var(--accent); border-radius: 2px; color: var(--accent);
+  font: 400 var(--text-2xs) var(--font-mono); letter-spacing: 0.04em;
+}
+.src-tag.src-gtowizard, .src-tag.src-chart { border-color: var(--line-2); color: var(--ink-3); }
+
+/* end of preflop */
+.end-card {
+  display: flex; flex-direction: column; gap: var(--s3); padding: var(--s4); max-width: 560px;
+  background: var(--bg-2); border: 1px solid var(--line); border-top: var(--rule) solid var(--accent); border-radius: var(--radius);
+}
+.end-line { margin: 0; font-size: var(--text-md); font-weight: 600; }
+.end-stacks { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); }
+.end-stacks > span { display: flex; flex-direction: column; gap: 3px; }
+.end-stacks b { font-weight: 400; font-size: var(--text-sm); }
+.board-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.board-row-link {
+  display: flex; justify-content: space-between; align-items: center; gap: var(--s3); padding: 6px 8px;
+  background: var(--bg-2); border-radius: 2px; text-decoration: none; color: var(--ink);
+  transition: background-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.board-row-link:hover { background: var(--bg-3); box-shadow: inset 2px 0 0 var(--accent); }
+.board-row-link:focus-visible { outline: none; box-shadow: var(--focus); }
+.board-row-link .cards { gap: 2px; }
+.board-row-link .card { width: 26px; height: 34px; font-size: 0.8rem; }
+
+@media (max-width: 1100px) {
+  .study .two-col > .main-col { border-bottom: 1px solid var(--line); }
+}
+@media (max-width: 700px) {
+  .study-setup > .field { flex: 1 1 40%; }
+  .study-links { margin-left: 0; width: 100%; justify-content: space-between; }
+  .study-strip .ln-card { min-width: 7rem; }
+}

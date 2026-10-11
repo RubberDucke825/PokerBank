@@ -1,0 +1,184 @@
+/* Trainer (/train): Ledger supplements to components.css (table, seats, action bar, feedback column,
+   RNG badge are there). Here: setup form, surface frame, result, phone action grid, progress panel, leaks. */
+
+/* ---------------------------------------------------------------- setup */
+.train-setup { display: grid; gap: var(--s4); }
+.train-opps { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: var(--s3); }
+.check-field { display: inline-flex; align-items: center; gap: var(--s2); min-height: 36px; font-size: var(--text-sm); color: var(--ink-2); cursor: pointer; }
+.check-field input { margin: 0; }
+.drill-field { min-width: 12rem; }
+.drill-row { display: flex; align-items: center; gap: var(--s2); min-height: 36px; }
+.drill-row input[type="range"] { flex: 1 1 8rem; min-width: 0; accent-color: var(--accent); }
+.drill-out { min-width: 2.8rem; text-align: right; font-family: var(--font-mono); color: var(--ink); }
+
+/* ---------------------------------------------------------------- page head */
+.train-page .page-head > .rng-holder { min-height: 36px; } /* RNG badge height: reserved when empty so the head never jumps */
+.train-head-tools { margin-left: auto; display: flex; gap: var(--s2); }
+.rng.fresh b { animation: rng-in var(--dur) var(--ease); }
+@keyframes rng-in { from { transform: translateY(4px); opacity: 0; } }
+.page-meta .roll + .roll::before, .page-meta .muted + .roll::before { content: "·"; margin-right: var(--s2); color: var(--ink-3); }
+.page-meta .roll { font-family: var(--font-mono); font-size: 0.75rem; }
+.drill-line { flex-basis: 100%; margin: 0; font-size: var(--text-sm); color: var(--ink-2); display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); align-items: baseline; }
+.drill-line[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- surface: table + fixed feedback column */
+.train-surface { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-0); min-width: 0; }
+.train-surface .two-col { min-height: 0; }
+.train-surface .main-col { padding-bottom: var(--s5); }
+.train-table { margin: var(--s2) auto 0; }
+
+/* viewport fit (>= 1100px): the table column no longer stretches to the feedback column; the feedback column is
+   sticky with its own scroll, so page height is fixed and the action bar sits right under the table. The table is
+   capped by viewport height: 380px = table top at scrollY 0 (topbar 56 + page head + surface edge, ~274)
+   + bottom margin 24 (hero seat's action label hangs below the table box) + main-col gap 20 + action bar 48 + 14 spare. */
+.train-actions { margin-top: 0; }
+@media (min-width: 1101px) {
+  .train-surface .main-col { align-self: start; }
+  .train-surface .side-col { position: sticky; top: 56px; align-self: start; height: calc(100vh - 56px); overflow-y: auto; }
+  .train-surface .train-table { margin-bottom: var(--s5); max-width: max(480px, min(var(--table-max), calc((100vh - 380px) * 2))); }
+}
+.train-center .card-slot { display: inline-block; }
+.train-result { text-align: center; }
+.train-result p { margin: 0; }
+.train-result-big { font: 400 var(--text-xl)/1.1 var(--font-mono); }
+.train-result .muted { font-size: 0.75rem; }
+.seat > .cards { min-height: 0; }
+.seat-name { max-width: 8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seat-act.act-call, .seat-act.act-check { color: var(--act-call); }
+.seat-act.act-bet, .seat-act.act-raise, .seat-act.act-allin { color: var(--act-raise-1); }
+.seat.is-allin .seat-stack { color: var(--act-raise-1); }
+
+/* action bar: wait line and next-hand button span the whole row */
+.train-actions { min-height: 48px; }
+.train-actions > .train-wait, .train-actions > .train-next { grid-column: 1 / -1; }
+.train-wait { margin: 0; justify-self: center; align-self: center; }
+.train-next { min-height: 48px; display: inline-flex; justify-content: center; align-items: center; gap: var(--s2); font-size: var(--text-md); }
+.train-next kbd { background: var(--accent-ink); color: var(--accent); }
+
+.solve-banner {
+  display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); align-items: baseline;
+  padding: var(--s2) var(--s3); border: 1px solid var(--line); border-left: var(--rule) solid var(--warn); border-radius: var(--radius);
+  background: var(--bg-2); font-size: var(--text-sm);
+}
+.solve-banner[hidden] { display: none; }
+.solve-banner strong { color: var(--warn); font-weight: 600; }
+
+/* feedback column contents */
+.train-feedback .fb-head .cards { align-self: flex-start; }
+.train-feedback .fb-head .card { width: 24px; height: 32px; font-size: 0.75rem; }
+.fb-verdict .best { min-width: 0; }
+.fb-dist { display: flex; flex-direction: column; gap: 8px; }
+.fb-rng-note .missed { color: var(--warn); }
+.fb-rng-note .badge { margin-left: var(--s2); }
+.fb-grid-wrap { display: flex; flex-direction: column; gap: var(--s3); }
+.fb-grid { display: grid; gap: var(--s2); width: 100%; }
+.fb-grid .grid13 { width: 100%; }
+.fb-session { display: flex; flex-direction: column; gap: var(--s3); margin-top: auto; padding-top: 18px; border-top: 1px solid var(--line); }
+.fb-totals { font-size: var(--text-sm); }
+
+/* phones: 48px targets, 3 + 2 for five actions (components.css), 2 x 2 for four */
+@media (max-width: 700px) {
+  .train-actions .action-btn:first-child:nth-last-child(4),
+  .train-actions .action-btn:first-child:nth-last-child(4) ~ .action-btn { grid-column: span 3; }
+  .train-actions .action-btn:only-child { grid-column: 1 / -1; }
+  .train-actions .act-sub { font-size: var(--text-2xs); }
+  .seat-name { max-width: 4.6rem; }
+  .train-center .cards .card { width: 28px; height: 38px; font-size: 0.875rem; }
+  .train-surface .main-col { padding: var(--s3) 12px var(--s4); }
+}
+
+/* ---------------------------------------------------------------- progress panel */
+.train-progress { gap: var(--s4); }
+.train-progress > summary {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s3); cursor: pointer; list-style: none; border-radius: var(--radius);
+}
+.train-progress > summary::-webkit-details-marker { display: none; }
+.train-progress > summary::before { content: "+"; font-family: var(--font-mono); color: var(--ink-3); width: 1ch; }
+.train-progress[open] > summary::before { content: "−"; }
+.train-progress > summary:hover .panel-title { color: var(--ink); }
+.prog-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin: var(--s3) 0 var(--s4); }
+.prog-tools .btn { padding: 0.25rem 0.75rem; }
+.prog-body { display: grid; gap: var(--s4); min-width: 0; }
+.kpis { display: flex; flex-wrap: wrap; gap: var(--s3) var(--s6); }
+.kpi { display: flex; flex-direction: column; gap: 4px; }
+.kpi b { font: 400 1.25rem/1.1 var(--font-mono); }
+.spark { margin: 0; display: grid; gap: var(--s1); height: auto; }  /* components.css .spark is a fixed 40px strip */
+.sparkline { width: 100%; height: 4.5rem; display: block; background: var(--bg-0); border: 1px solid var(--line); border-radius: var(--radius); }
+.spark-zero { stroke: var(--line-2); stroke-width: 1; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
+.spark-line { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.spark-dot { stroke-width: 7; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.spark-dot.pos { stroke: var(--good); }
+.spark-dot.neg { stroke: var(--bad); }
+.prog-tables { display: grid; gap: var(--s4); grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); align-items: start; }
+.prog-table, .prog-leaks { display: grid; gap: var(--s2); min-width: 0; }
+.prog-table .fb-sub, .prog-leaks .fb-sub { margin: 0; }
+
+/* leaks table */
+.prog-leaks tr[hidden] { display: none !important; }
+.prog-leaks .linkish { justify-self: start; font-size: var(--text-sm); }
+.leak-spot { white-space: normal !important; min-width: 11rem; }
+.leak-weight { min-width: 9rem; }
+.leak-weight-in { display: flex; align-items: center; gap: var(--s2); font-family: var(--font-mono); font-size: 0.75rem; }
+.weight-bar { flex: 1 1 5rem; height: 6px; border-radius: 1px; background: var(--bg-3); overflow: hidden; }
+.weight-bar span { display: block; height: 100%; background: var(--ink-3); transform-origin: left; }
+
+@media (max-width: 700px) {
+  .kpis { gap: var(--s3) var(--s5); }
+  .prog-table table.data th, .prog-table table.data td { padding: 0.4rem; }
+}
+@media (max-width: 560px) {
+  /* phones: each leak becomes a block, spot on top and labelled numbers below */
+  .prog-leaks thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .prog-leaks tbody tr { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--s1) var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); }
+  .prog-leaks tbody th, .prog-leaks tbody td { display: grid; padding: 0 !important; border: 0 !important; text-align: left !important; }
+  .prog-leaks tbody th.leak-spot { grid-column: 1 / -1; min-width: 0; font-weight: 600; }
+  .prog-leaks tbody td::before { content: attr(data-label); font: 400 var(--text-2xs) var(--font-mono); letter-spacing: var(--track); text-transform: uppercase; color: var(--ink-3); }
+  .prog-leaks tbody td.leak-weight { grid-column: 1 / -1; grid-template-columns: auto 1fr; align-items: center; gap: var(--s2); min-width: 0; }
+}
+
+/* components.css zeroes .fb-actions padding after the .side-col > * gutter; restore it so the chosen row stays inside */
+.train-feedback > .fb-actions { padding-left: var(--s5); padding-right: var(--s5); }
+.fb-verdict .best { flex: 1 1 auto; }
+.fb-verdict .freq { margin-left: auto; white-space: nowrap; font: 400 1.375rem var(--font-mono); }
+@media (max-width: 1100px) { .train-feedback > .fb-actions { padding-left: 16px; padding-right: 16px; } }
+
+/* Table fit: seats, dealer and bets sit on a ring inset by half a seat plate, so no plate leaves the
+   table box (and so the main column) at any width; plates are capped and long names truncate. */
+.train-table { --seat-w: 176px; }
+.train-table [style*="--cx"] { left: calc(50% + var(--cx) * (50% - var(--seat-w) / 2)); }
+.seat-plate { max-width: var(--seat-w); min-width: 0; }
+.seat.is-hero .seat-plate { max-width: none; }   /* hero is always bottom centre (--cx 0): it cannot reach an edge */
+.seat-plate .seat-name { min-width: 0; flex: 0 1 auto; }
+.seat-plate .pos-tag, .seat-plate .seat-stack { flex: none; }
+.dealer { box-shadow: 0 0 0 1px var(--line-2); }
+@media (max-width: 700px) {
+  .train-table { --seat-w: 92px; }
+}
+
+/* Leaks panel in the feedback column (js/views/leaks_panel.js): top spots by expected blunders per 100
+   hands, the current hand's drill marked with the accent swatch. */
+.leaks-side { display: flex; flex-direction: column; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+.leaks-side .head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s2); }
+.leaks-side-list { list-style: none; margin: 0; padding: 0; }
+.leaks-side-list li {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr) repeat(3, 2.75rem) 2.25rem; gap: 8px; align-items: baseline;
+  padding: 6px 0; border-bottom: 1px solid var(--line); font-size: var(--text-sm); color: var(--ink-2);
+}
+.leaks-side-list li:last-child { border-bottom: 0; }
+.leaks-side-list .swatch { background: transparent; box-shadow: inset 0 0 0 1px var(--line-2); align-self: center; }
+.leaks-side-list li.is-drilled { color: var(--ink); }
+.leaks-side-list li.is-drilled .swatch { background: var(--accent); box-shadow: none; }
+.leaks-side-list .leak-label { min-width: 0; overflow-wrap: anywhere; }
+.leaks-side-list .num { font-size: 0.75rem; text-align: right; }
+.leaks-side-list .per100 { color: var(--ink); }
+.leaks-side-list .n { color: var(--ink-3); }
+.leaks-side-list li.cols { padding-bottom: 4px; font: 400 var(--text-2xs) var(--font-mono); letter-spacing: var(--track); text-transform: uppercase; color: var(--ink-3); }
+.leaks-side-list li.cols .num { font-size: var(--text-2xs); }
+
+/* multiway postflop decisions: not solved, not graded; a quiet mono label, no verdict colour */
+.fb-status.mute { color: var(--ink-3); text-transform: uppercase; letter-spacing: var(--track); }
+.fb-verdict .freq.grade-mute:empty { display: none; }
+
+/* frequency grades (Plan 7): best / mixed / blunder colour the chosen action's solver frequency */
+.grade-ok { color: var(--good); } .grade-warn { color: var(--warn); } .grade-bad { color: var(--bad); } .grade-na { color: var(--ink-3); }
+.train-feedback .fb-freqs li { grid-template-columns: 10px 1fr 64px; }
