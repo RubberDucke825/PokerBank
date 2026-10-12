@@ -225,6 +225,9 @@ def library_fill(
     cached_only: Annotated[bool, typer.Option(
         "--cached-only", help="record documents already in the cache (pulled from elsewhere) into "
                               "the index, solve nothing")] = False,
+    reverse: Annotated[bool, typer.Option(
+        "--reverse", help="walk the order from its light end (so a second set of shards meets the "
+                          "first in the middle without overlap)")] = False,
 ) -> None:
     """Solve the trainer's heads-up flop library (pn.train.library_fill): matchups by expected
     burn x texture-stratified flops, most valuable first. Resumable (cached boards are
@@ -233,7 +236,8 @@ def library_fill(
     the background, e.g. `nohup pn library fill > fill.log 2>&1 &`. `--shard i/n` takes every
     n-th item of the same order, so n fills on separate cache roots split the work
     (tools/cloud_fill.sh). `--dry-run` with `--accuracy` also counts the boards still missing at
-    the finest pass; `--cached-only` indexes pulled documents (one index write)."""
+    the finest pass; `--cached-only` indexes pulled documents (one index write); `--reverse` walks
+    the order backwards, so a forward and a reverse shard set share one pool without overlap."""
     from pn.solve import SolveCache
     from pn.solve.cache import cache_dir
     from pn.solve.request import TABLE_SEATS
@@ -257,6 +261,8 @@ def library_fill(
         ms = [m for m in ms if m.pot in pots]
     burn = lf.load_burns(ms, table, depth, db)
     items = lf.plan(ms, burn, flop_list, configs or None)
+    if reverse:
+        items = items[::-1]
     if shard is not None:
         i, n = _shard(shard)
         items = items[i::n]
