@@ -1,4 +1,4 @@
-# Sharded `pn library fill` on GitHub Actions (public repo: free 4-vCPU runners, 20 at a time, 6 h each).
+# Sharded `pn library fill` on GitHub Actions (public repo: free 4-vCPU runners, the account's concurrency limit (~40 seen), 6 h each).
 # Private inputs (config/ charts, the solved cache) arrive as an encrypted release asset `seed`
 # (openssl, secret FILL_KEY); each shard uploads its new documents as an encrypted artifact.
 # Driven from the private repo by tools/gha_fill.sh (export | seed | start | status | pull).
@@ -31,7 +31,6 @@ jobs:
     timeout-minutes: 358
     strategy:
       fail-fast: false
-      max-parallel: 20
       matrix:
         shard: ${{ fromJson(needs.plan.outputs.shards) }}
     env:
