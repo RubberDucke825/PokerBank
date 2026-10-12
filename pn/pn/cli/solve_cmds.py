@@ -239,8 +239,12 @@ def library_fill(
     from pn.solve.request import TABLE_SEATS
     from pn.train import flop_library as flib
     from pn.train import library_fill as lf
+    from pn.train import preflop as pre
     from pn.train.spots import POTS
 
+    if not pre.has_freqs():
+        raise _fail("GTO Wizard frequencies missing (data/gtowizard): the plan would hash default "
+                    "preflop sizes and solve boards no machine with the file can use")
     if preset != flib.LIBRARY_PRESET or backend != flib.LIBRARY_BACKEND:
         raise _fail(f"the trainer deals from --preset {flib.LIBRARY_PRESET} --backend "
                     f"{flib.LIBRARY_BACKEND} documents only")  # fmt: skip

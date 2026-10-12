@@ -100,6 +100,13 @@ def _freqs() -> dict:
         return {}
 
 
+def has_freqs() -> bool:
+    """Whether the GTO Wizard frequencies (data/gtowizard) are on this machine. The trainer's
+    raise sizes come from them; without the file the engine sizes by defaults, so a flop spot
+    (and its cache key) differs from one built where the file exists."""
+    return bool(_freqs())
+
+
 def gtow_spot(key: str | None, depth_bb: int, freqs: Mapping | None = None) -> tuple[str, dict] | None:
     """(full key, spot) at the nearest GTO Wizard depth that has `key`."""
     if key is None:
