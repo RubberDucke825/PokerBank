@@ -152,7 +152,7 @@ def solve_run(
 def library_status(
     table: Annotated[int, typer.Option(help="table size")] = 6,
     depth: Annotated[int, typer.Option(help="stack depth in bb")] = 100,
-    flops: Annotated[int, typer.Option(help="planned flops per matchup")] = 50,
+    flops: Annotated[str, typer.Option(help="planned flops per matchup (a count or `all`)")] = "50",
     db: DbOpt = DEFAULT_DB,
 ) -> None:
     """The trainer's heads-up flop library: solved / planned boards per matchup, by expected
@@ -167,7 +167,7 @@ def library_status(
     ms = flib.matchups(TABLE_SEATS[table], depth, f"{table}max", sb=50, bb=100)
     burn = lf.load_burns(ms, table, depth, db)
     index = flib.FlopIndex(cache_dir())
-    rows = lf.coverage(ms, index, burn, flops)
+    rows = lf.coverage(ms, index, burn, len(_flops(flops)))
     covered = sum(r["solved"] > 0 for r in rows)
     console.print(f"heads-up flop library {cache_dir()}: {covered}/{len(rows)} matchups with a "
                   f"solved board, {sum(r['solved'] for r in rows)} boards")  # fmt: skip
@@ -175,6 +175,21 @@ def library_status(
     console.print(f"  boards by accuracy: {acc or 'none'}")
     for r in rows:
         console.print(f"  {r['solved']:>4}/{r['planned']:<4} burn {r['burn']:>8.3f}  {r['label']}")
+
+
+def _flops(text: str):
+    """`--flops`: `all` = every canonical flop heaviest first, else n texture-stratified ones."""
+    from pn.train import library_fill as lf
+
+    if text == "all":
+        return lf.all_flops()
+    try:
+        n = int(text)
+    except ValueError:
+        raise _fail("bad --flops: want a count or `all`") from None
+    if n < 1:
+        raise _fail("bad --flops: want a count >= 1 or `all`")
+    return lf.stratified_flops(n)
 
 
 def _shard(text: str) -> tuple[int, int]:
@@ -191,7 +206,8 @@ def _shard(text: str) -> tuple[int, int]:
 
 @library_app.command("fill")
 def library_fill(
-    flops: Annotated[int, typer.Option(help="texture-stratified canonical flops per matchup")] = 50,
+    flops: Annotated[str, typer.Option(
+        help="texture-stratified canonical flops per matchup, or `all` (1,755, heaviest first)")] = "50",
     configs: Annotated[int, typer.Option(help="top matchups by expected burn (0 = all)")] = 6,
     table: Annotated[int, typer.Option(help="table size")] = 6,
     depth: Annotated[int, typer.Option(help="stack depth in bb")] = 100,
@@ -206,6 +222,9 @@ def library_fill(
         help="solve only every n-th item of the order starting at i, as `i/n` (0 <= i < n); "
              "shards on other machines each need their own PN_SOLVE_CACHE, merged by copying")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="print the order, solve nothing")] = False,
+    cached_only: Annotated[bool, typer.Option(
+        "--cached-only", help="record documents already in the cache (pulled from elsewhere) into "
+                              "the index, solve nothing")] = False,
 ) -> None:
     """Solve the trainer's heads-up flop library (pn.train.library_fill): matchups by expected
     burn x texture-stratified flops, most valuable first. Resumable (cached boards are
@@ -213,7 +232,8 @@ def library_fill(
     whole order once per pass, coarse to fine; a board already finer is left alone. Run it in
     the background, e.g. `nohup pn library fill > fill.log 2>&1 &`. `--shard i/n` takes every
     n-th item of the same order, so n fills on separate cache roots split the work
-    (tools/cloud_fill.sh)."""
+    (tools/cloud_fill.sh). `--dry-run` with `--accuracy` also counts the boards still missing at
+    the finest pass; `--cached-only` indexes pulled documents (one index write)."""
     from pn.solve import SolveCache
     from pn.solve.cache import cache_dir
     from pn.solve.request import TABLE_SEATS
@@ -224,14 +244,15 @@ def library_fill(
     if preset != flib.LIBRARY_PRESET or backend != flib.LIBRARY_BACKEND:
         raise _fail(f"the trainer deals from --preset {flib.LIBRARY_PRESET} --backend "
                     f"{flib.LIBRARY_BACKEND} documents only")  # fmt: skip
-    if table not in TABLE_SEATS or flops < 1 or configs < 0 or any(a <= 0 for a in accuracy or []) \
+    if table not in TABLE_SEATS or configs < 0 or any(a <= 0 for a in accuracy or []) \
             or any(p not in POTS for p in pots or []):
-        raise _fail("bad --table, --flops, --configs, --accuracy or --pots")
+        raise _fail("bad --table, --configs, --accuracy or --pots")
+    flop_list = _flops(flops)
     ms = flib.matchups(TABLE_SEATS[table], depth, f"{table}max", sb=50, bb=100)
     if pots:
         ms = [m for m in ms if m.pot in pots]
     burn = lf.load_burns(ms, table, depth, db)
-    items = lf.plan(ms, burn, lf.stratified_flops(flops), configs or None)
+    items = lf.plan(ms, burn, flop_list, configs or None)
     if shard is not None:
         i, n = _shard(shard)
         items = items[i::n]
@@ -240,6 +261,11 @@ def library_fill(
         for it in items:
             console.print(f"{it.burn:8.3f}  {it.flop.flop}  {it.matchup.label}")
         tag = f" (shard {shard})" if shard is not None else ""
+        if accuracy:
+            index, finest = flib.FlopIndex(cache_dir()), min(accuracy)
+            left = sum(1 for it in items
+                       if (a := index.accuracy(it.matchup.mid, it.flop.flop)) is None or a > finest)
+            tag += f", {left} remaining at {finest:g}% pot"
         console.print(f"{len(items)} solves planned{tag}")
         return
     root = cache_dir()
@@ -251,7 +277,8 @@ def library_fill(
                 if acc is not None:
                     console.print(f"--- pass: accuracy {acc:g}% pot")
                 results += lf.fill(items, cache, flib.FlopIndex(root), backend=backend, accuracy=acc,
-                                   on_result=lambda r: console.print(
+                                   cached_only=cached_only,
+                                   on_result=lambda r: r.status == "missing" or console.print(
                                        f"{r.status:7} {r.flop} {r.label} {r.detail}"))  # fmt: skip
     except RuntimeError as e:
         raise _fail(str(e)) from e

@@ -22,7 +22,8 @@ import hashlib
 import json
 import random
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -185,9 +186,12 @@ class FlopIndex:
         self._data: dict[str, Any] = {"matchups": {}}
         self._mtime: float | None = None
         self._lock = threading.Lock()
+        self._batch: dict[str, Any] | None = None  # the copy record() edits inside batch()
 
     def load(self) -> dict[str, Any]:
         with self._lock:
+            if self._batch is not None:
+                return self._batch
             try:
                 mtime = self.path.stat().st_mtime
             except FileNotFoundError:
@@ -206,14 +210,29 @@ class FlopIndex:
 
     def record(self, m: Matchup, board: str, key: str, weight: int,
                accuracy: float | None = None) -> None:  # fmt: skip
-        data = json.loads(json.dumps(self.load()))
+        data = self._batch if self._batch is not None else json.loads(json.dumps(self.load()))
         entry = data["matchups"].setdefault(m.mid, {"label": m.label, "pot": m.pot,
                                                     "positions": list(m.positions),
                                                     "depth": m.depth, "boards": {}})  # fmt: skip
         entry["boards"][board] = {"key": key, "weight": weight}
         if accuracy is not None:
             entry["boards"][board]["accuracy"] = accuracy
-        self._write(data)
+        if self._batch is None:
+            self._write(data)
+
+    @contextmanager
+    def batch(self) -> Iterator[None]:
+        """Defer writes: record() edits one copy of the index until the block ends, then one
+        write (a walk over tens of thousands of boards would otherwise rewrite the file each)."""
+        data = json.loads(json.dumps(self.load()))
+        with self._lock:
+            self._batch = data
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._batch = None
+            self._write(data)
 
     def accuracy(self, mid: str, board: str) -> float | None:
         """The recorded accuracy of a board's solve (None when unknown or unsolved)."""

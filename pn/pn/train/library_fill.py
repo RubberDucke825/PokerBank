@@ -77,6 +77,12 @@ def stratified_flops(n: int) -> list[fl.Flop]:
     return out
 
 
+def all_flops() -> list[fl.Flop]:
+    """Every canonical flop (1,755), heaviest first (most raw flops map to it), with its raw
+    weight, so a prefix covers the most-dealt flops and the stratified picks are a subset."""
+    return sorted(fl.canonical_flops(), key=lambda f: -f.weight)
+
+
 def _chunks(flops: list[fl.Flop], n: int) -> list[list[fl.Flop]]:
     total = sum(f.weight for f in flops)
     chunks: list[list[fl.Flop]] = [[] for _ in range(n)]
@@ -173,7 +179,7 @@ class FillResult:
     label: str
     flop: str
     key: str
-    status: str  # solved | cached | finer | failed
+    status: str  # solved | cached | finer | failed | missing
     detail: str = ""
 
 
@@ -213,11 +219,23 @@ def single_fill(root: Path) -> Iterator[None]:
 def fill(items: Sequence[FillItem], cache: SolveCache, index: FlopIndex, *,
          backend: str = LIBRARY_BACKEND, accuracy: float | None = None,
          wait: Callable[[], None] | None = None,
-         on_result: Callable[[FillResult], None] | None = None) -> list[FillResult]:  # fmt: skip
+         on_result: Callable[[FillResult], None] | None = None,
+         cached_only: bool = False) -> list[FillResult]:  # fmt: skip
     """Solve the items in order to `accuracy` % of pot (None = the preset's). A Preempted solve
     waits for the priority solves (`wait`, default: until none is waiting) and is retried; other
     failures are reported and skipped; a board already indexed at a finer or equal accuracy is
-    reported "finer" and left as it is."""
+    reported "finer" and left as it is. `cached_only` records the documents already in the cache
+    (pulled from other machines) and reports the rest "missing" without solving, writing the
+    index once at the end."""
+    if cached_only:
+        with index.batch():
+            return _fill(items, cache, index, backend, accuracy, wait, on_result, True)
+    return _fill(items, cache, index, backend, accuracy, wait, on_result, False)
+
+
+def _fill(items: Sequence[FillItem], cache: SolveCache, index: FlopIndex, backend: str,
+          accuracy: float | None, wait: Callable[[], None] | None,
+          on_result: Callable[[FillResult], None] | None, cached_only: bool) -> list[FillResult]:  # fmt: skip
     wait = wait or (lambda: _wait_idle(cache.root))
     out: list[FillResult] = []
     for it in items:
@@ -236,6 +254,8 @@ def fill(items: Sequence[FillItem], cache: SolveCache, index: FlopIndex, *,
         if cached is not None and (cached.get("meta") or {}).get("backend") == backend:
             index.record(it.matchup, it.flop.flop, key, it.flop.weight, acc)
             res = FillResult(it.matchup.label, it.flop.flop, key, "cached")
+        elif cached_only:
+            res = FillResult(it.matchup.label, it.flop.flop, key, "missing")
         while res is None:
             try:
                 doc = cache.solve(spot, backend, background=True)
