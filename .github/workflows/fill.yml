@@ -59,7 +59,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download seed -p seed.tgz.enc -R "$GITHUB_REPOSITORY"
+          # the asset is re-uploaded (--clobber) after every pull; a download that lands mid-upload fails, so retry
+          for i in 1 2 3 4; do gh release download seed -p seed.tgz.enc -R "$GITHUB_REPOSITORY" && break || { rm -f seed.tgz.enc; sleep 30; }; done
+          [[ -s seed.tgz.enc ]]
           openssl enc -d -aes-256-cbc -pbkdf2 -pass env:FILL_KEY -in seed.tgz.enc | tar xz
           rm seed.tgz.enc
           mkdir -p data/solves/cache && touch .seeded
