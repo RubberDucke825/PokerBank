@@ -242,6 +242,10 @@ def _fill(items: Sequence[FillItem], cache: SolveCache, index: FlopIndex, backen
         board = tuple(fl.flop_cards(it.flop.flop))
         have = index.accuracy(it.matchup.mid, it.flop.flop)
         if accuracy is not None and have is not None and have <= accuracy:
+            if cached_only:  # a stratified fill recorded the chunk's weight; the wide plan carries the raw one
+                entry = index.boards(it.matchup.mid).get(it.flop.flop) or {}
+                if entry.get("weight") != it.flop.weight and entry.get("key"):
+                    index.record(it.matchup, it.flop.flop, entry["key"], it.flop.weight, have)
             res = FillResult(it.matchup.label, it.flop.flop, "", "finer", f"at {have:g}% pot")
             out.append(res)
             if on_result:

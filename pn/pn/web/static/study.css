@@ -59,3 +59,18 @@
   .study-links { margin-left: 0; width: 100%; justify-content: space-between; }
   .study-strip .ln-card { min-width: 7rem; }
 }
+
+/* Board picker: the Actions column at the end of preflop (same tile grammar as the action tiles). */
+.board-filter { display: flex; flex-direction: column; gap: 8px; }
+.board-q { width: 100%; min-height: 36px; padding: 6px 10px; font: 500 var(--text-sm) var(--font-mono); color: var(--ink);
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius); }
+.board-q:focus-visible { outline: none; box-shadow: var(--focus); }
+.board-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.board-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.board-tile { --act: var(--bg-3); color: var(--ink); text-shadow: none; min-height: 0; padding: 8px 8px 6px; gap: 6px;
+  grid-template-columns: 1fr; grid-template-areas: "cards" "w"; justify-items: center; border: 1px solid var(--line); }
+.board-tile:hover { filter: none; background: var(--bg-2); border-color: var(--line-2); }
+.board-tile .cards { grid-area: cards; gap: 2px; }
+.board-tile .card { width: 24px; height: 32px; font-size: 0.78rem; }
+.board-tile .board-w { grid-area: w; font-size: var(--text-2xs); color: var(--ink-3); }
+@media (max-width: 480px) { .board-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

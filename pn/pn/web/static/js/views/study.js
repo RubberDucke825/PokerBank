@@ -1,7 +1,8 @@
 // Preflop navigator (/strategy?table=6&depth=100&line=LJ:fold,HJ:raise): GTO Wizard-style study of
 // preflop lines. Top: table / depth setup; a strip with one card per seat (click an option to act or
 // to rewrite the line from that seat). Left: the actor's 13x13 strategy grid; right: Actions tiles.
-// At the end of preflop: the heads-up flop's solved boards (open in the tree browser) or a summary.
+// At the end of preflop the Actions column turns into the board picker: the heads-up flop's solved
+// boards as tiles with a rank/card filter and texture chips (open in the tree browser), or a summary.
 // Keyboard: 1-9 choose the nth option, Backspace removes the last step.
 import { h, api, num, pct, cards, setQuery, navigate, errorBox, showTip, hideTip } from "../core.js";
 import { renderGrid, actionColors, ALL_CLASSES } from "../grid.js";
@@ -18,6 +19,7 @@ const seg = (label, options, value, onPick) => h("div", { class: "seg", role: "g
 
 /** "Kc9c8d" -> ["Kc", "9c", "8d"]. */
 const boardCards = (b) => b.match(/../g) || [];
+const RANKS = "AKQJT98765432";
 
 export async function studyView(_params, q) {
   const st = {
@@ -151,23 +153,68 @@ export async function studyView(_params, q) {
         end.note ? h("p", { class: "note" }, end.note) : null)];
   }
 
+  // ---------------------------------------------------------------- board picker
+  // At the end of preflop the Actions column becomes the board picker: the solved flops of the
+  // heads-up matchup as tiles (weight = raw flops the canonical board stands for), narrowed by a
+  // typed prefix ("K98" by ranks, "Kc9c8d" by exact cards) and texture chips. Enter opens the first.
+  const TEXTURES = [["all", "All"], ["rainbow", "Rainbow"], ["two-tone", "Two-tone"], ["mono", "Mono"], ["paired", "Paired"]];
+  const PAGE = 48;
+  const bp = { query: "", texture: "all", shown: PAGE };
+  const texture = (b) => {
+    const cs = boardCards(b);
+    const suits = new Set(cs.map((c) => c[1])).size;
+    return { suits: suits === 3 ? "rainbow" : suits === 2 ? "two-tone" : "mono", paired: new Set(cs.map((c) => c[0])).size < 3 };
+  };
+  const matches = (b) => {
+    const t = texture(b.board);
+    if (bp.texture === "paired" ? !t.paired : bp.texture !== "all" && t.suits !== bp.texture) return false;
+    const q = bp.query.replace(/\s+/g, "");
+    if (!q) return true;
+    const ranks = boardCards(b.board).map((c) => c[0]).join("");
+    return /^[AKQJT2-9]+$/i.test(q) ? ranks.startsWith(q.toUpperCase()) : b.board.toLowerCase().startsWith(q.toLowerCase());
+  };
+  const open = (b) => navigate(`/strategy/${enc(b.solve)}`);
+
+  function boardPicker(end) {
+    const rankKey = (b) => boardCards(b).map((c) => String(RANKS.indexOf(c[0])).padStart(2, "0")).join("");  // A-high first
+    const rows = (end.boards || []).slice().sort((a, b) => b.weight - a.weight || rankKey(a.board).localeCompare(rankKey(b.board)));
+    const hits = rows.filter(matches);
+    const box = h("div", { class: "act-tiles board-tiles", role: "list", "aria-label": "Solved flops" });
+    const more = h("button", { type: "button", class: "chip", onclick: () => { bp.shown += PAGE; paint(); } });
+    const count = h("span", { class: "muted mono" });
+    const paint = () => {
+      count.textContent = hits.length === rows.length ? `${rows.length} solved` : `${hits.length} of ${rows.length}`;
+      box.replaceChildren(...hits.slice(0, bp.shown).map((b) => h("button", { type: "button", class: "act-tile board-tile", role: "listitem",
+        title: `${b.board} · stands for ${num(b.weight, 0)} flops`, onclick: () => open(b) },
+        cards(boardCards(b.board)), h("span", { class: "board-w mono" }, num(b.weight, 0)))));
+      if (!hits.length) box.replaceChildren(h("p", { class: "note" }, rows.length ? "No solved flop matches." : "No solved flop for this matchup yet."));
+      more.textContent = `Show ${Math.min(PAGE, hits.length - bp.shown)} more`;
+      more.hidden = hits.length <= bp.shown;
+    };
+    const input = h("input", { type: "search", class: "board-q", placeholder: "K98 or Kc9c8d", value: bp.query, "aria-label": "Filter flops",
+      oninput: (e) => { bp.query = e.target.value; bp.shown = PAGE; redraw(); },
+      onkeydown: (e) => { if (e.key === "Enter" && hits[0]) open(hits[0]); } });
+    const chips = h("div", { class: "board-chips", role: "group", "aria-label": "Texture" }, TEXTURES.map(([v, text]) =>
+      h("button", { type: "button", class: "chip", "aria-pressed": String(bp.texture === v), onclick: () => { bp.texture = v; bp.shown = PAGE; redraw(); } }, text)));
+    function redraw() { const q = input.value; paintPicker(end); const el = body.querySelector(".board-q"); if (el) { el.focus(); el.setSelectionRange(q.length, q.length); } }
+    paint();
+    return h("section", { class: "side-block acts-block board-pick", "aria-label": "Board" },
+      h("div", { class: "head" }, h("span", { class: "label" }, "Board"), count),
+      h("div", { class: "board-filter" }, input, chips),
+      box, more,
+      end.solvable && end.matchup ? h("button", { type: "button", class: "btn solve-btn", onclick: () => {
+        const qs = new URLSearchParams({ table: st.table, depth: st.depth, street: "flop", line: end.matchup.pot_type, positions: end.players.join(",") });
+        navigate(`/strategy/new?${qs}`);
+      } }, "Solve another board") : null);
+  }
+  function paintPicker(end) {
+    const old = body.querySelector(".board-pick");
+    if (old) old.replaceWith(boardPicker(end));
+  }
+
   function endBoards(end) {
-    const out = [];
-    if (end.kind === "flop") {
-      const rows = end.boards || [];
-      out.push(h("section", { class: "side-block boards-block", "aria-label": "Solved flops" },
-        h("div", { class: "head" }, h("span", { class: "label" }, "Solved flops"), h("span", { class: "muted mono" }, String(rows.length))),
-        rows.length ? h("ul", { class: "board-list" }, rows.map((b) => h("li", {},
-          h("a", { href: `/strategy/${enc(b.solve)}`, "data-link": true, class: "board-row-link" }, cards(boardCards(b.board)),
-            h("span", { class: "mono muted" }, `w ${num(b.weight, 0)}`)))))
-          : h("p", { class: "note" }, end.matchup ? "No solved flop for this matchup yet." : "Solved flops are heads-up only.")));
-    }
-    if (end.solvable && end.matchup) {
-      const qs = new URLSearchParams({ table: st.table, depth: st.depth, street: "flop", line: end.matchup.pot_type, positions: end.players.join(",") });
-      out.push(h("section", { class: "side-block" },
-        h("button", { type: "button", class: "btn solve-btn", onclick: () => navigate(`/strategy/new?${qs}`) }, "Solve a board")));
-    }
-    return out;
+    if (end.kind === "flop") return [boardPicker(end)];
+    return end.solvable && end.matchup ? [h("section", { class: "side-block" }, h("p", { class: "note" }, "Solved flops are heads-up only."))] : [];
   }
 
   function draw() {
