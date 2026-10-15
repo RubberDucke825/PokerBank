@@ -21,6 +21,8 @@ class Drill:
     spot: str
     line: Line
     landed: bool = False
+    texture: str | None = None  # postflop drills: the flop texture to deal (None: any solved board)
+    formation: str | None = None  # a formation pin's drill: the formation it is dealt in
 
     @property
     def target(self) -> dict[str, Any]:
@@ -52,17 +54,25 @@ def _lib_weights(doc: Mapping, nid: str, row: str, k: int | None = None) -> dict
     return {c: float(w) * float(s[k]) for c, w, s in zip(combos, base, strat, strict=True)}
 
 
-def _gtow_weights(freqs: Mapping, depth: int, srcs: Sequence[tuple]) -> dict[str, float]:
-    """Product over (key, codes) of the class's share of those codes (uniform without data)."""
+def _gtow_weights(freqs: Mapping | None, depth: int, srcs: Sequence[tuple]) -> dict[str, float]:
+    """Product over (key, codes) of the class's share of those codes (uniform without data;
+    `freqs` None = the installed GTO Wizard frequencies, as pn.train.preflop.gtow_spot).
+    A ("pc", (table, kind, position, other), codes) source (8-max UTG / UTG1 keys, Plan 16)
+    reads the PokerCoaching chart's class shares."""
     from pn.train import preflop as pre
 
     w = {c: 1.0 for c in ranges.all_combos()}
-    for _, key, codes in srcs:
-        found = pre.gtow_spot(key, depth, freqs)
-        if found is None:
+    for kind, key, codes in srcs:
+        if kind == "pc":
+            pc = pre.pc_class_dists(*key)
+            dist_of = (lambda cls, d=pc[0]: d.get(cls, {})) if pc else None
+        else:
+            found = pre.gtow_spot(key, depth, freqs)
+            dist_of = (lambda cls, s=found[1]: pre.cell_dist(s, cls)) if found else None
+        if dist_of is None:
             continue
         for c in w:
-            dist = pre.cell_dist(found[1], ranges.combo_class(c))
+            dist = dist_of(ranges.combo_class(c))
             w[c] *= sum(dist.get(code, 0.0) for code in codes)
     return w
 
@@ -75,12 +85,12 @@ def _weights(line: Line, position: str, freqs: Mapping | None, depth: int) -> di
         if src[0] == "lib_leaf":
             return _lib_weights(line.doc, src[1], "reach_by_player", src[2])
         own = [s.src for s in line.steps if s.position == position and s.src]
-        return _gtow_weights(freqs or {}, depth, own) if own else None
+        return _gtow_weights(freqs, depth, own) if own else None
     own = [s.src for s in line.steps if s.position == position and s.src]
     lib = [s for s in own if s[0] == "lib"]
     if lib:  # the last node's reach already carries the earlier own actions
         return _lib_weights(line.doc, lib[-1][1], "reach", lib[-1][2])
-    return _gtow_weights(freqs or {}, depth, own) if own else None
+    return _gtow_weights(freqs, depth, own) if own else None
 
 
 def flop_ranges(doc: Mapping) -> dict[str, dict[str, float]]:

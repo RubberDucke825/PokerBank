@@ -13,6 +13,10 @@ are not solved (2026-10-07: 2-player only): solve status "none" with note "multi
 play the fallback policy, hero decisions are recorded ungraded with note "multiway_unsolvable".
 Plan 7: hero decisions are graded by frequency (pn.train.grading: best / mixed / blunder), every
 villain plays the GTO / chart strategy (source "gto" only, no profile blend, no locked solves).
+Plan 13: per-hand feedback history, drill pins (Config.drill_spot) and retry (a replay: graded,
+never counted). The state records (Config, Hand, Session ...) live in pn.train.model.
+Plan 14: drill planning (pn.train.planner: importance-weighted spots, flop textures, texture pins)
+and per-session importance parameters (`params`); decisions record board, pot and formation.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,18 +40,17 @@ from pn import ranges
 from pn.adapter.state import BOARD_LEN, STREETS
 from pn.ingest import db as ingest_db
 from pn.solve import SolveCache, SpotError, SpotRequest, SubgameError, build_spot
-from pn.solve import flops as fl
 from pn.solve.backend import MULTIWAY_UNSOLVABLE, SolveError
 from pn.solve.request import TABLE_SEATS, apply_preset
 from pn.solve.sources import ProfileSource
 from pn.solve.subgame import subgame_request
 from pn.train import drills, grading, spots, stats
 from pn.train import flop_library as flib
+from pn.train import importance as imp
 from pn.train import postflop as post
 from pn.train import preflop as pre
 from pn.train import rng as dice
 from pn.train import suitmap as sm
-from pn.train.drills import Drill
 from pn.train.engine import (
     IllegalAction,
     State,
@@ -57,14 +60,22 @@ from pn.train.engine import (
     round_closed,
     start,
 )
-from pn.train.leaks import Leaks, Line
+from pn.train.leaks import Leaks
+from pn.train.model import (
+    Config,
+    Hand,
+    Seating,
+    Session,
+    SessionNotFound,
+    SolveInfo,
+    TrainError,
+)
+from pn.train.planner import DrillPlanner
 from pn.train.postflop import Player, Tree
 from pn.train.showdown import settle
 
 BB = 100  # cents
 SB = BB // 2
-DEPTHS = (100, 200)
-TRAIN_SOURCES = ("gto",)  # Plan 7: no opponent-specific (locked) solves
 MAX_SESSIONS = 32
 TRAINER_PRESET = "trainer"
 RANKS, SUITS = "23456789TJQKA", "shdc"
@@ -77,131 +88,6 @@ OFF_TREE = "off_tree"  # no flop / turn leaf to lift the street from: not solved
 LEAKS_TOP = 3
 log = logging.getLogger(__name__)
 
-class TrainError(ValueError):
-    """Bad request for the session's current state."""
-
-
-class SessionNotFound(LookupError):
-    """Unknown (or evicted) session id."""
-
-
-@dataclass(frozen=True)
-class Config:
-    table: int = 6
-    depth: int = 100
-    hero_seat: str | None = None  # starting position; None = random
-    opponents: tuple[str | None, ...] = ()  # player id per villain seat (None = GTO bot)
-    source: str = "gto"
-    seed: int | None = None
-    rng_enabled: bool = True  # roll 1-100 for each hero decision
-    window: int = 1000  # hands in state.rolling
-    drill_share: float = 0.8  # share of hands dealt as leak drills (needs a Leaks model)
-
-    def __post_init__(self) -> None:
-        if self.table not in TABLE_SEATS:
-            raise TrainError(f"table must be one of {sorted(TABLE_SEATS)}")
-        if self.depth not in DEPTHS:
-            raise TrainError(f"depth must be one of {DEPTHS}")
-        if self.hero_seat is not None and self.hero_seat not in TABLE_SEATS[self.table]:
-            raise TrainError(f"hero_seat must be one of {TABLE_SEATS[self.table]}")
-        if len(self.opponents) > self.table - 1:
-            raise TrainError(f"at most {self.table - 1} opponents")
-        if self.source not in TRAIN_SOURCES:
-            raise TrainError(f"source must be one of {TRAIN_SOURCES}")
-        if self.window < 1:
-            raise TrainError("window must be >= 1")
-        if not 0.0 <= self.drill_share <= 1.0:
-            raise TrainError("drill_share must be in [0, 1]")
-
-    @property
-    def table_kind(self) -> str:
-        return f"{self.table}max"
-
-
-@dataclass(frozen=True)
-class Totals:
-    hands: int = 0
-    decisions: int = 0  # graded decisions (best / mixed / blunder)
-    preflop_decisions: int = 0
-    freq_error_sum: float = 0.0
-    best: int = 0
-    mixed: int = 0
-    blunders: int = 0
-    hero_net: int = 0  # cents, informational
-
-    def add(self, grade: Mapping[str, Any]) -> Totals:
-        """Count one graded decision (grade best | mixed | blunder)."""
-        g = grade["grade"]
-        t = replace(self, decisions=self.decisions + 1, best=self.best + (g == grading.BEST),
-                    mixed=self.mixed + (g == grading.MIXED),
-                    blunders=self.blunders + (g == grading.BLUNDER))  # fmt: skip
-        if grade.get("street") == "preflop":
-            t = replace(t, preflop_decisions=t.preflop_decisions + 1,
-                        freq_error_sum=t.freq_error_sum + float(grade["freq_error"]))  # fmt: skip
-        return t
-
-    def view(self) -> dict[str, Any]:
-        pf, n = self.preflop_decisions, self.decisions
-        return {"decisions": n, "best": self.best, "mixed": self.mixed, "blunders": self.blunders,
-                "blunder_rate": round(self.blunders / n, 4) if n else None,
-                "hands": self.hands, "preflop_decisions": pf,
-                "avg_freq_error": round(self.freq_error_sum / pf, 4) if pf else None,
-                "hero_net": self.hero_net}  # fmt: skip
-
-
-@dataclass(frozen=True)
-class SolveInfo:
-    status: str = "none"  # none | solving | ready | failed | fallback
-    backend: str | None = None
-    note: str | None = None
-    name: str | None = None  # Registry name of the street's solve (grid_ref)
-
-
-@dataclass(frozen=True)
-class Hand:
-    no: int
-    rotation: int
-    players: tuple[Player, ...]  # engine seat order (preflop order)
-    state: State
-    deck: tuple[str, ...]
-    tree: Tree | None = None
-    solve: SolveInfo = SolveInfo()
-    feedback: dict | None = None
-    result: dict | None = None
-    origins: tuple[str | None, ...] = ()  # per history entry: how a villain chose it
-    tokens: tuple[str, ...] = ()  # per history entry: the action token taken
-    rng: int | None = None  # roll for hero's pending decision
-    decisions: tuple[dict, ...] = ()  # train_decisions rows, written at hand end
-    drill: Drill | None = None  # active drill (None: natural hand or the drill was left)
-    drill_spot: str | None = None  # the drill attempted this hand (kept after a deviation)
-    drill_landed: bool = False
-    multiway: bool = False  # a postflop street started with 3+ players: no more solves this hand
-    perm: sm.Perm = sm.IDENTITY  # library flop document suit -> dealt suit (Pick.perm)
-
-
-@dataclass
-class Seating:
-    """Physical seats: 0 is hero, 1.. the opponents (player id or None) with display names."""
-
-    ids: list[str | None]
-    names: list[str]
-
-
-@dataclass
-class Session:
-    sid: str
-    cfg: Config
-    seating: Seating
-    rng: random.Random
-    hand: Hand
-    dice: random.Random  # RNG rolls only, so the deals do not depend on rng_enabled
-    drill_rng: random.Random  # drill picks and drill hands
-    totals: Totals = Totals()
-    rolling: dict | None = None  # stats.totals over the session's window (None without a DB)
-    future: Future | None = None
-    pending_req: SpotRequest | None = None
-    lock: threading.RLock = field(default_factory=threading.RLock)
-
 
 def _grid_ref(grade: Mapping[str, Any], h: Hand) -> dict[str, str] | None:
     """Where the UI finds the strategy grid of a graded decision."""
@@ -212,7 +98,7 @@ def _grid_ref(grade: Mapping[str, Any], h: Hand) -> dict[str, str] | None:
     return None
 
 
-class Trainer:
+class Trainer(DrillPlanner):
     """In-memory sessions. Street solves go through `cache` (trainer preset, hard-timeout
     runner); `register(doc, req) -> name` publishes them for grid_ref; `background=False`
     solves inline (tests)."""
@@ -238,6 +124,8 @@ class Trainer:
 
     # ------------------------------------------------------------ sessions
     def new(self, cfg: Config) -> dict[str, Any]:
+        if _pinned(cfg):
+            self._check_pin(cfg)
         rng = random.Random(cfg.seed)
         order = TABLE_SEATS[cfg.table]
         ids = [None, *cfg.opponents, *[None] * (cfg.table - 1 - len(cfg.opponents))]
@@ -286,10 +174,53 @@ class Trainer:
                 raise TrainError("the hand is not over")
             if s.future is not None and not s.future.done():
                 raise TrainError("a solve is still running")
-            s.future, s.pending_req = None, None
+            s.future, s.pending_req, s.snaps = None, None, []
             rot = (s.hand.rotation - 1) % s.cfg.table  # the button moves one seat
             s.hand = self._deal_hand(s.cfg, s.rng, s.drill_rng, rot, s.hand.no + 1, s.seating.ids,
                                      s.seating.names)  # fmt: skip
+            self._advance(s)
+            return self._view(s)
+
+    def drill(self, sid: str, spot: str | None, texture: str | None = None,
+              formation: str | None = None) -> dict[str, Any]:  # fmt: skip
+        """Pin (or with None unpin) the drill spot or formation and / or the postflop drills'
+        flop texture dealt from the next hand on."""
+        s = self.get(sid)
+        with s.lock:
+            cfg = replace(s.cfg, drill_spot=spot, drill_texture=texture, drill_formation=formation)
+            if _pinned(cfg):
+                self._check_pin(cfg)
+            s.cfg = cfg
+            self._advance(s)
+            return self._view(s)
+
+    def params(self, sid: str, p_form: int | None = None, p_tex: int | None = None,
+               pot_mode: str | None = None) -> dict[str, Any]:  # fmt: skip
+        """Change the importance parameters (drill weights) from the next deal on."""
+        s = self.get(sid)
+        with s.lock:
+            given = {"p_form": p_form, "p_tex": p_tex, "pot_mode": pot_mode}
+            s.cfg = replace(s.cfg, **{k: v for k, v in given.items() if v is not None})
+            self._advance(s)
+            return self._view(s)
+
+    def retry(self, sid: str) -> dict[str, Any]:
+        """Rewind to just before hero's latest decision this hand; the rest is a replay (graded,
+        never counted: the original play stays in totals and is recorded once)."""
+        s = self.get(sid)
+        with s.lock:
+            if s.future is not None and not s.future.done():
+                raise TrainError("a solve is still running")
+            if not s.snaps:
+                raise TrainError("no hero decision to retry this hand")
+            cur, snap = s.hand, s.snaps.pop()
+            s.future, s.pending_req = None, None  # the abandoned branch's solve is ignored
+            if not cur.recorded:  # close the original attempt as abandoned: the replay never counts
+                hero = next(i for i, p in enumerate(cur.players) if p.hero)
+                self._count_hand(s, cur.players[hero].position, -cur.state.contributed[hero])
+            s.hand = replace(snap, rng=None, replay=True, recorded=True,
+                             feedback=cur.feedback, hand_feedback=cur.hand_feedback,
+                             decisions=cur.decisions, drill_landed=cur.drill_landed)  # fmt: skip
             self._advance(s)
             return self._view(s)
 
@@ -304,66 +235,8 @@ class Trainer:
         drill, fixed = plan
         rotation = TABLE_SEATS[cfg.table].index(drill.line.hero)
         hand = self._deal(cfg, rng, rotation, no, ids, names, fixed)
-        return replace(hand, drill=drill, drill_spot=drill.spot)
-
-    def _plan(self, cfg: Config, drill_rng: random.Random) -> tuple[Drill, dict] | None:
-        if self.leaks is None or cfg.drill_share <= 0 or drill_rng.random() >= cfg.drill_share:
-            return None
-        try:
-            if self.db is not None:
-                with ingest_db.opened(self.db) as conn:
-                    rows = self.leaks.rows(conn, cfg.table, cfg.depth, cfg.window)
-            else:
-                rows = self.leaks.rows(None, cfg.table, cfg.depth, cfg.window)
-            rows = [r for r in rows if r["weight"] > 0 and self._drill_line(cfg, r["spot"])]
-            if not rows:
-                return None
-            spot = drill_rng.choices([r["spot"] for r in rows], [r["weight"] for r in rows])[0]
-            line = self._drill_line(cfg, spot)
-            if line is None or line.hero not in TABLE_SEATS[cfg.table]:
-                return None
-            flop_rng, dead = self._flop_ranges(cfg, line, drill_rng) if spot.startswith("post|") else (None, ())
-            fixed = drills.sample_hands(line, drill_rng, self.freqs, cfg.depth, flop_rng, dead)
-        except (sqlite3.Error, OSError, ValueError, KeyError, IndexError) as e:
-            log.warning("drill skipped: %s", e)
-            return None
-        return Drill(spot, line), fixed
-
-    def _drill_line(self, cfg: Config, spot: str) -> Line | None:
-        """The line to deal a drill of `spot`: preflop spots the leak model's line; a postflop
-        spot the highest-reach line of its pot and side whose heads-up flop has at least one
-        solved board (the drill would otherwise end at the flop), None without one."""
-        if self.leaks is None:
-            return None
-        if not spot.startswith("post|"):
-            return self.leaks.line(cfg.table, cfg.depth, spot)
-        for line in self.leaks.lines(cfg.table, cfg.depth, spot):
-            k = (cfg.table, cfg.depth, line.steps)
-            if k not in self._drill_mids:
-                st = flib.replay(TABLE_SEATS[cfg.table], cfg.depth,
-                                 [(x.position, x.kind) for x in line.steps], sb=SB, bb=BB,
-                                 freqs=self.freqs)  # fmt: skip
-                m = flib.matchup_of(st, cfg.table_kind, cfg.depth) if st is not None else None
-                self._drill_mids[k] = m.mid if m is not None else None
-            mid = self._drill_mids[k]
-            if mid is not None and self.flops.boards(mid):
-                return line
-        return None
-
-    def _flop_ranges(self, cfg: Config, line: Line,
-                     drill_rng: random.Random) -> tuple[dict | None, tuple[str, ...]]:  # fmt: skip
-        """(ranges, board cards) of one solved board of the line's matchup, drawn by weight:
-        the flop players' hands come from the library ranges and avoid the board, so the drill
-        lands on a graded combo with that board still in the deck."""
-        mid = self._drill_mids.get((cfg.table, cfg.depth, line.steps))
-        boards = sorted(self.flops.boards(mid).items()) if mid else []
-        if not boards:
-            return None, ()
-        board, entry = drill_rng.choices(boards, [max(1, int(e.get("weight", 1))) for _, e in boards])[0]
-        doc = self.cache.get(entry["key"])
-        if doc is None:
-            return None, ()
-        return drills.flop_ranges(doc), tuple(fl.flop_cards(board))
+        return replace(hand, drill=drill, drill_spot=drill.spot, drill_texture=drill.texture,
+                       drill_formation=drill.formation)  # fmt: skip
 
     @staticmethod
     def _deal(cfg: Config, rng: random.Random, rotation: int, no: int, ids: list[str | None],
@@ -486,7 +359,7 @@ class Trainer:
         if nxt == "flop" and len(st.in_hand()) == 2:
             matchup = flib.matchup_of(st, s.cfg.table_kind, s.cfg.depth)
             if matchup is not None:
-                pick = flib.pick_board(self.flops, self.cache, matchup.mid, h.deck, s.rng)
+                pick = self._pick_flop(h, matchup, s.rng)
         if pick is not None:
             cards, deck = pick.board, tuple(c for c in h.deck if c not in pick.board)
         else:
@@ -542,7 +415,7 @@ class Trainer:
                       pick: flib.Pick | None) -> None:  # fmt: skip
         """The solved flop document becomes the street's tree; without one the hand ends."""
         if matchup is None or pick is None:
-            s.hand = replace(s.hand, solve=SolveInfo(note=NO_LIBRARY))
+            s.hand = replace(s.hand, solve=SolveInfo(note=NO_LIBRARY, detail=_no_board(s.cfg, matchup)))
             if s.hand.drill is not None and not s.hand.drill.landed:
                 self._leave_drill(s)
             self._finish(s)
@@ -591,6 +464,7 @@ class Trainer:
         opt = next((o for o in opts if o["token"] == token), None)
         if opt is None:
             raise TrainError(f"{token!r} is not legal here: {[o['token'] for o in opts]}")
+        s.snaps.append(h)
         i = st.to_act
         combo = h.players[i].combo
         spot = spots.from_state(st, i)
@@ -618,14 +492,15 @@ class Trainer:
                  "hand": h.no, "position": h.players[i].position, "board": list(st.board),
                  "pot": st.pot}  # fmt: skip
         grade = {**grade, **dice.judge(options, token, h.rng)}
-        if grade["grade"] in grading.GRADES:
+        if grade["grade"] in grading.GRADES and not h.replay:
             s.totals = s.totals.add(grade)
-        row = stats.decision_row(_hand_uid(s), len(h.decisions), grade,
-                                 stats.situation_kind(st, i), ranges.combo_class(combo), spot)  # fmt: skip
+        row = stats.decision_row(_hand_uid(s), len(h.decisions), grade, stats.situation_kind(st, i),
+                                 ranges.combo_class(combo), spot, imp.state_formation(st))  # fmt: skip
         ref = (pre.pc_ref(st, i, s.cfg.table_kind) if str(grade["origin"]).startswith("pc:")
                else _grid_ref(grade, h))  # fmt: skip
-        s.hand = replace(s.hand, feedback={**grade, "grid_ref": ref}, rng=None,
-                         decisions=(*h.decisions, row))  # fmt: skip
+        fb = {**grade, "grid_ref": ref, "retry": h.replay}
+        s.hand = replace(s.hand, feedback=fb, rng=None, hand_feedback=(*h.hand_feedback, fb),
+                         decisions=h.decisions if h.replay else (*h.decisions, row))  # fmt: skip
         self._apply(s, opt["kind"], opt["to"], None, opt.get("child"), token)
         if token == "fold":
             self._finish(s)
@@ -653,10 +528,15 @@ class Trainer:
             "won": {h.players[i].position: won[i] for i in range(st.n) if won[i]},
             "net": {h.players[i].position: net[i] for i in range(st.n)},
         }  # fmt: skip
-        s.totals = replace(s.totals, hands=s.totals.hands + 1,
-                           hero_net=s.totals.hero_net + net[hero])  # fmt: skip
-        s.hand = replace(h, deck=deck, result=result)
-        self._record(s, h.players[hero].position, net[hero])
+        s.hand = replace(h, deck=deck, result=result, recorded=True)
+        if h.recorded:  # a replay: the original attempt was counted
+            return
+        self._count_hand(s, h.players[hero].position, net[hero])
+
+    def _count_hand(self, s: Session, hero_pos: str, net: int) -> None:
+        """Count the current hand once: totals.hands / hero_net and its train_hands row."""
+        s.totals = replace(s.totals, hands=s.totals.hands + 1, hero_net=s.totals.hero_net + net)
+        self._record(s, hero_pos, net)
 
     def _record(self, s: Session, hero_pos: str, net: int) -> None:
         """Persist the finished hand and refresh state.rolling (a DB error never breaks play)."""
@@ -682,7 +562,9 @@ class Trainer:
         try:
             with ingest_db.opened(self.db) as conn:
                 out = stats.totals(stats.rolling(conn, cfg.window))
-                top = (self.leaks.rows(conn, cfg.table, cfg.depth, cfg.window)[:LEAKS_TOP]
+                # wait=False: a hand end never scans the SolveCache
+                top = (self.leaks.rows(conn, cfg.table, cfg.depth, cfg.window, wait=False, p_form=cfg.p_form,
+                                       p_tex=cfg.p_tex, pot=cfg.pot_mode)[:LEAKS_TOP]
                        if self.leaks is not None else [])  # fmt: skip
         except (sqlite3.Error, OSError, ValueError, KeyError) as e:
             log.warning("trainer rolling stats unavailable: %s", e)
@@ -725,13 +607,26 @@ class Trainer:
             "to_act": st.positions[st.to_act] if st.to_act is not None and res is None else None,
             "legal_actions": legal, "solving": s.future is not None,
             "solve": {"status": "solving" if s.future is not None else h.solve.status,
-                      "backend": h.solve.backend, "note": h.solve.note, "name": h.solve.name},
+                      "backend": h.solve.backend, "note": h.solve.note, "name": h.solve.name,
+                      "detail": h.solve.detail},
             "feedback": h.feedback, "totals": s.totals.view(), "hand_over": res is not None,
             "result": res, "rng": h.rng if res is None else None, "rng_enabled": cfg.rng_enabled,
             "rolling": s.rolling, "drill": h.drill.view() if h.drill is not None else None,
             "drill_share": cfg.drill_share if self.leaks is not None else 0.0,
             "solve_error": h.solve.note if h.solve.status == "failed" else None,
+            "hand_feedback": list(h.hand_feedback), "replay": h.replay,
+            "pinned_drill": _pin_view(cfg, h),
+            "params": {"p_form": cfg.p_form, "p_tex": cfg.p_tex, "pot_mode": cfg.pot_mode},
         }  # fmt: skip
+
+
+def _no_board(cfg: Config, m: flib.Matchup | None) -> str | None:
+    """solve.detail of a heads-up flop without a solved board."""
+    if m is None:
+        return None
+    if m.pot == "limped" and (cfg.table, cfg.depth) != (6, 100):
+        return f"limped pots are not solved at {cfg.table}-max {cfg.depth}bb (Plan 16): {m.label}"
+    return f"no solved flop for {m.label} yet"
 
 
 def _real_hero(req: SpotRequest, h: Hand) -> SpotRequest:
@@ -756,6 +651,31 @@ def _hero_doc(doc: dict, h: Hand) -> dict:
     hero, whose own cards stay live in its range, from the parent document)."""
     pos = next(p for p in h.players if p.hero).position
     return {**doc, "players": [{**p, "hero": p["position"] == pos} for p in doc["players"]]}
+
+
+def _pinned(cfg: Config) -> bool:
+    return any(x is not None for x in (cfg.drill_spot, cfg.drill_texture, cfg.drill_formation))
+
+
+def _pin_view(cfg: Config, h: Hand) -> dict[str, Any] | None:
+    """state.pinned_drill: {spot, label, dealt, texture, formation} while a spot, a formation or
+    a texture is pinned."""
+    spot, tex, form = cfg.drill_spot, cfg.drill_texture, cfg.drill_formation
+    if not _pinned(cfg):
+        return None
+    dealt = (h.drill_spot is not None and (spot is None or h.drill_spot == spot)
+             and (form is None or h.drill_formation == form)
+             and (tex is None or h.drill_texture == tex))  # fmt: skip
+    label = _spot_label(spot) if spot is not None else form or f"{tex} flops"
+    return {"spot": spot, "label": label, "dealt": dealt, "texture": tex, "formation": form}
+
+
+def _spot_label(spot: str) -> str:
+    """The leak table's label of a spot (pn.train.spots.label), else the spot id."""
+    try:
+        return spots.label(spot)
+    except (ValueError, KeyError):
+        return spot
 
 
 def _hand_uid(s: Session) -> str:

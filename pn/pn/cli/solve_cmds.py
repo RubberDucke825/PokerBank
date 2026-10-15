@@ -3,8 +3,10 @@
 pn spot <hand_id> --street flop [--hero ID] [--range PID=TEXT] [--out f.toml]   GTO ranges
 pn solve new --seats BTN,BB --depth 100 [--board Kd2cKh --line srp] [--out f.toml]   anonymous spot
 pn solve run <spot.toml> [--preset review]   solve through the cache (TexasSolver), print key + path
-pn library fill [--flops 50] [--configs 6] [--dry-run]   trainer heads-up flop library -> cache
-pn library status   flop library coverage per matchup
+pn library fill [--flops 50 | --subset 184] [--lib 8x100 ...] [--new-only] [--configs 6] [--dry-run]
+    trainer heads-up flop library -> cache
+pn library status   flop library coverage per matchup (+ solved / aliased / missing per table/depth)
+pn library alias --table 8 --depth 100   8-max lines without UTG/UTG1 action read the 6-max boards
 pn live now <game> --hero ID [--cards AhKd]   one recommendation for the hand in progress
 pn live watch <game> --hero ID                poll and print range-level recommendations
 """
@@ -153,6 +155,7 @@ def library_status(
     table: Annotated[int, typer.Option(help="table size")] = 6,
     depth: Annotated[int, typer.Option(help="stack depth in bb")] = 100,
     flops: Annotated[str, typer.Option(help="planned flops per matchup (a count or `all`)")] = "50",
+    subset: Annotated[int | None, typer.Option(help="planned: the weighted N-flop subset")] = None,
     db: DbOpt = DEFAULT_DB,
 ) -> None:
     """The trainer's heads-up flop library: solved / planned boards per matchup, by expected
@@ -160,6 +163,7 @@ def library_status(
     from pn.solve.cache import cache_dir
     from pn.solve.request import TABLE_SEATS
     from pn.train import flop_library as flib
+    from pn.train import library_alias as la
     from pn.train import library_fill as lf
 
     if table not in TABLE_SEATS:
@@ -167,14 +171,64 @@ def library_status(
     ms = flib.matchups(TABLE_SEATS[table], depth, f"{table}max", sb=50, bb=100)
     burn = lf.load_burns(ms, table, depth, db)
     index = flib.FlopIndex(cache_dir())
-    rows = lf.coverage(ms, index, burn, len(_flops(flops)))
+    rows = lf.coverage(ms, index, burn, subset if subset is not None else len(_flops(flops)))
     covered = sum(r["solved"] > 0 for r in rows)
     console.print(f"heads-up flop library {cache_dir()}: {covered}/{len(rows)} matchups with a "
                   f"solved board, {sum(r['solved'] for r in rows)} boards")  # fmt: skip
     acc = ", ".join(f"{k}% pot: {n}" for k, n in lf.accuracy_counts(index).items())
     console.print(f"  boards by accuracy: {acc or 'none'}")
+    for t, d in la.LIBS:  # Plan 16: every table / depth the trainer deals
+        console.print(f"  {la.summary_line(la.coverage(index, t, d))}")
+    state = {r["mid"]: r for r in la.coverage(index, table, depth)["rows"]}
     for r in rows:
-        console.print(f"  {r['solved']:>4}/{r['planned']:<4} burn {r['burn']:>8.3f}  {r['label']}")
+        s = state[r["mid"]]
+        tag = "skipped" if s["skipped"] else s["state"]
+        console.print(f"  {r['solved']:>4}/{r['planned']:<4} burn {r['burn']:>8.3f}  {tag:<7}  {r['label']}")
+
+
+@library_app.command("alias")
+def library_alias(
+    table: Annotated[int, typer.Option(help="table size of the aliased matchups")] = 8,
+    depth: Annotated[int, typer.Option(help="stack depth in bb")] = 100,
+    sample: Annotated[int, typer.Option(
+        help="indexed boards per target whose recorded key is re-derived (0 = all)")] = 25,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="check only, write nothing")] = False,
+) -> None:
+    """Alias every 8-max matchup without UTG / UTG1 action to the 6-max matchup of the same line
+    and depth (Plan 16 P2: identical flop keys, so the trainer deals the 6-max boards). Checks
+    the keys first (probe boards + `--sample` indexed boards); one refusal writes nothing.
+    Idempotent."""
+    from pn.solve.cache import cache_dir
+    from pn.solve.request import TABLE_SEATS
+    from pn.train import flop_library as flib
+    from pn.train import library_alias as la
+    from pn.train.model import DEPTHS
+
+    if table not in TABLE_SEATS or table == 6 or depth not in DEPTHS:
+        raise _fail(f"--table must be one of {sorted(set(TABLE_SEATS) - {6})}, --depth one of {DEPTHS}")
+    if not dry_run:
+        _no_running_fill(cache_dir())
+    index = flib.FlopIndex(cache_dir())
+    rows = la.run(index, table, depth, sample=sample, dry_run=dry_run)
+    for r in rows:
+        if r.status in ("refused", "solved"):
+            console.print(f"  {r.status:7} {r.matchup.label}: {r.detail}")
+    n = {s: sum(r.status == s for r in rows) for s in ("new", "present", "solved", "refused")}
+    verb = "would write" if dry_run else "wrote"
+    if n["refused"]:
+        raise _fail(f"{n['refused']} refused: no alias written ({len(rows)} candidates)")
+    console.print(f"{table}max/{depth}bb aliases in {index.path}: {verb} {n['new']}, "
+                  f"{n['present']} present, {n['solved']} solved on their own")  # fmt: skip
+
+
+def _no_running_fill(root) -> None:
+    """typer.Exit(1) while a fill or --cached-only walk runs on the root: its final index write
+    (from its own snapshot) would erase this command's entries."""
+    from pn.train import library_fill as lf
+
+    if (pid := lf.running_fill(root)) is not None:
+        raise _fail(f"a library fill is running on {root} (pid {pid}): its final index write would "
+                    "undo this one; rerun when it ends")  # fmt: skip
 
 
 def _flops(text: str):
@@ -204,17 +258,40 @@ def _shard(text: str) -> tuple[int, int]:
     return i, n
 
 
+def _libs(lib: list[str] | None, table: int, depth: int) -> list[tuple[int, int]]:
+    """`--lib 8x200` (repeatable), else the single `--table` x `--depth` library."""
+    from pn.train import library_fill as lf
+
+    try:
+        return [lf.parse_lib(x) for x in lib] if lib else [lf.parse_lib(f"{table}x{depth}")]
+    except ValueError as e:
+        raise _fail(str(e)) from None
+
+
 @library_app.command("fill")
 def library_fill(
-    flops: Annotated[str, typer.Option(
-        help="texture-stratified canonical flops per matchup, or `all` (1,755, heaviest first)")] = "50",
+    flops: Annotated[str | None, typer.Option(
+        help="texture-stratified canonical flops per matchup, or `all` (1,755, heaviest first); "
+             "default 50")] = None,
+    subset: Annotated[int | None, typer.Option(
+        help="the weighted N-flop subset (texture x high card; Plan 16: 184) instead of --flops; "
+             "recorded on each matchup entry")] = None,
     configs: Annotated[int, typer.Option(help="top matchups by expected burn (0 = all)")] = 6,
     table: Annotated[int, typer.Option(help="table size")] = 6,
     depth: Annotated[int, typer.Option(help="stack depth in bb")] = 100,
+    lib: Annotated[list[str] | None, typer.Option(
+        help="libraries TABLExDEPTH, repeatable (e.g. --lib 8x100 --lib 6x200): one order over "
+             "all of them; replaces --table/--depth")] = None,
+    new_only: Annotated[bool, typer.Option(
+        "--new-only", help="skip limped pots and 8-max lines that alias the 6-max line of the "
+                           "same depth (Plan 16 budget decision)")] = False,
     preset: Annotated[str, typer.Option(help="solve preset (the trainer reads `library`)")] = "library",
     backend: Annotated[str, typer.Option(help="solver backend (the trainer reads `texas`)")] = "texas",
     accuracy: Annotated[list[float] | None, typer.Option(
         help="accuracy passes in % of pot, run in order (e.g. 1 0.5 0.3); default the preset's")] = None,
+    depth_accuracy: Annotated[list[str] | None, typer.Option(
+        help="DEPTH=PCT, repeatable: the accuracy for that depth's matchups instead of "
+             "--accuracy (Plan 16: 200=2)")] = None,
     pots: Annotated[list[str] | None, typer.Option(
         help="pot types to fill (limped, srp, 3bp, 4bp+), repeatable; default all")] = None,
     db: DbOpt = DEFAULT_DB,
@@ -236,30 +313,52 @@ def library_fill(
     the background, e.g. `nohup pn library fill > fill.log 2>&1 &`. `--shard i/n` takes every
     n-th item of the same order, so n fills on separate cache roots split the work
     (tools/cloud_fill.sh). `--dry-run` with `--accuracy` also counts the boards still missing at
-    the finest pass; `--cached-only` indexes pulled documents (one index write); `--reverse` walks
-    the order backwards, so a forward and a reverse shard set share one pool without overlap."""
+    the finest pass, and prints per library the matchup and board counts and one sample flop key
+    checked against the trainer's lookup; `--cached-only` indexes pulled documents (one index
+    write); `--reverse` walks the order backwards, so a forward and a reverse shard set share one
+    pool without overlap. Fails before planning when an input the keys hash is missing."""
     from pn.solve import SolveCache
     from pn.solve.cache import cache_dir
-    from pn.solve.request import TABLE_SEATS
     from pn.train import flop_library as flib
     from pn.train import library_fill as lf
     from pn.train import preflop as pre
     from pn.train.spots import POTS
 
+    libs = _libs(lib, table, depth)
     if not pre.has_freqs():
         raise _fail("GTO Wizard frequencies missing (data/gtowizard): the plan would hash default "
                     "preflop sizes and solve boards no machine with the file can use")
+    if missing := lf.missing_inputs(libs):
+        raise _fail(f"missing inputs the flop keys hash: {', '.join(missing)}")
     if preset != flib.LIBRARY_PRESET or backend != flib.LIBRARY_BACKEND:
         raise _fail(f"the trainer deals from --preset {flib.LIBRARY_PRESET} --backend "
                     f"{flib.LIBRARY_BACKEND} documents only")  # fmt: skip
-    if table not in TABLE_SEATS or configs < 0 or any(a <= 0 for a in accuracy or []) \
-            or any(p not in POTS for p in pots or []):
-        raise _fail("bad --table, --configs, --accuracy or --pots")
-    flop_list = _flops(flops)
-    ms = flib.matchups(TABLE_SEATS[table], depth, f"{table}max", sb=50, bb=100)
-    if pots:
-        ms = [m for m in ms if m.pot in pots]
-    burn = lf.load_burns(ms, table, depth, db)
+    if configs < 0 or any(a <= 0 for a in accuracy or []) or any(p not in POTS for p in pots or []):
+        raise _fail("bad --configs, --accuracy or --pots")
+    if subset is not None and flops is not None:
+        raise _fail("--subset replaces --flops: pass one")
+    try:
+        per_depth = lf.parse_depth_accuracy(depth_accuracy or [])
+    except ValueError as e:
+        raise _fail(str(e)) from None
+    try:
+        flop_list = lf.subset_flops(subset) if subset is not None else _flops(flops or "50")
+    except ValueError as e:
+        raise _fail(f"bad --subset: {e}") from None
+    ms: list[flib.Matchup] = []
+    burn: dict[str, float] = {}
+    notes: list[str] = []
+    for t, d in libs:
+        part = lf.lib_matchups(t, d)
+        n_all, skipped = len(part), ""
+        if new_only:
+            part, n_alias, n_limp = lf.new_lines(t, d, part)
+            skipped = f" ({n_alias} aliased, {n_limp} limped skipped)"
+        if pots:
+            part = [m for m in part if m.pot in pots]
+        burn.update(lf.load_burns(part, t, d, db))
+        ms += part
+        notes.append(f"{t}max/{d}: {len(part)} of {n_all} matchups{skipped} x {len(flop_list)} boards")
     items = lf.plan(ms, burn, flop_list, configs or None)
     if reverse:
         items = items[::-1]
@@ -268,15 +367,7 @@ def library_fill(
         items = items[i::n]
     passes: list[float | None] = list(accuracy) if accuracy else [None]
     if dry_run:
-        for it in items:
-            console.print(f"{it.burn:8.3f}  {it.flop.flop}  {it.matchup.label}")
-        tag = f" (shard {shard})" if shard is not None else ""
-        if accuracy:
-            index, finest = flib.FlopIndex(cache_dir()), min(accuracy)
-            left = sum(1 for it in items
-                       if (a := index.accuracy(it.matchup.mid, it.flop.flop)) is None or a > finest)
-            tag += f", {left} remaining at {finest:g}% pot"
-        console.print(f"{len(items)} solves planned{tag}")
+        _dry_run(items, notes, libs, shard, accuracy, per_depth)
         return
     root = cache_dir()
     cache = SolveCache(root, runner=lf.preemptible_runner(root))
@@ -287,13 +378,54 @@ def library_fill(
                 if acc is not None:
                     console.print(f"--- pass: accuracy {acc:g}% pot")
                 results += lf.fill(items, cache, flib.FlopIndex(root), backend=backend, accuracy=acc,
-                                   cached_only=cached_only,
-                                   on_result=lambda r: r.status == "missing" or console.print(
+                                   cached_only=cached_only, subset=subset, depth_accuracy=per_depth,
+                                   on_result=lambda r: r.status in ("missing", "aliased") or console.print(
                                        f"{r.status:7} {r.flop} {r.label} {r.detail}"))  # fmt: skip
     except RuntimeError as e:
         raise _fail(str(e)) from e
     done = sum(r.status in lf.DONE_STATES for r in results)
-    console.print(f"{done}/{len(results)} boards in the library")
+    n_alias = sum(r.status == "aliased" for r in results)
+    console.print(f"{done}/{len(results)} boards in the library"
+                  + (f" ({n_alias} of aliased matchups skipped)" if n_alias else ""))  # fmt: skip
+
+
+def _dry_run(items, notes: list[str], libs: list[tuple[int, int]], shard: str | None,
+             accuracy: list[float] | None, per_depth: dict[int, float]) -> None:  # fmt: skip
+    """The planned order, then per library its counts and one sample flop key (first label and
+    board, so every machine prints the same one) compared with the trainer's lookup of the same
+    line (pn.train.library_fill.trainer_key), then the total."""
+    from pn.solve import flops as fl
+    from pn.solve.cache import cache_dir
+    from pn.train import flop_library as flib
+    from pn.train import library_fill as lf
+
+    for it in items:
+        console.print(f"{it.burn:8.3f}  {it.flop.flop}  {it.matchup.table_kind}  {it.matchup.label}")
+    finest = min(accuracy) if accuracy else None
+
+    def target(depth: int) -> float | None:
+        return per_depth.get(depth, finest)
+
+    for (t, d), note in zip(libs, notes, strict=True):
+        acc = target(d)
+        console.print(f"{note} at {f'{acc:g}% pot' if acc is not None else 'the preset accuracy'}")
+        mine = [x for x in items if x.matchup.table_kind == f"{t}max" and x.matchup.depth == d]
+        if not mine:
+            continue
+        it = min(mine, key=lambda x: (x.matchup.label, x.flop.flop))  # not by burn: burns differ by machine
+        board = tuple(fl.flop_cards(it.flop.flop))
+        key = flib.flop_spot(it.matchup, board, target(d))[2]
+        mid, tkey = lf.trainer_key(it.matchup, board, target(d))
+        same = "same" if (mid, tkey) == (it.matchup.mid, key) else "DIFFERENT"
+        console.print(f"  sample {t}max/{d} {it.matchup.label} {it.flop.flop}: mid {it.matchup.mid} "
+                      f"key {key}; trainer lookup {same}")  # fmt: skip
+    tag = f" (shard {shard})" if shard is not None else ""
+    if accuracy or per_depth:
+        index = flib.FlopIndex(cache_dir())
+        left = sum(1 for it in items if (a := index.accuracy(it.matchup.mid, it.flop.flop)) is None
+                   or (target(it.matchup.depth) is not None and a > target(it.matchup.depth)))  # fmt: skip
+        tag += f", {left} remaining" + (f" at {finest:g}% pot" if finest is not None and not per_depth else "")
+    console.print(f"{len(items)} solves planned{tag}")
 
 
 @library_app.command("reindex")
@@ -309,6 +441,7 @@ def library_reindex(
 
     if table not in TABLE_SEATS:
         raise _fail(f"--table must be one of {sorted(TABLE_SEATS)}")
+    _no_running_fill(cache_dir())
     ms = flib.matchups(TABLE_SEATS[table], depth, f"{table}max", sb=50, bb=100)
     moved = flib.FlopIndex(cache_dir()).rekey(ms)
     console.print(f"{moved} matchups re-keyed in {cache_dir() / flib.INDEX_NAME}")

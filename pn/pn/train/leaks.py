@@ -11,19 +11,17 @@ freq(spot) = expected occurrences per hand of hero deciding in the spot, hero's 
   of natural hands, then FIRST_FALLBACK for flop `first`. Only pots that reach the flop heads-up count
   (2026-10-07: 2-player only): multiway preflop leaves, 3+ player street solves and trainer
   hands with a "multiway_unsolvable" decision contribute nothing, so drills target HU flops.
-Mistakes come from train_decisions in the window (Plan 7, no EVs): the blunder rate per occurrence
-(pn.train.grading `blunder`, preflop and postflop alike), shrunk toward the global rate with
-prior weight PRIOR_N. The global rate is itself shrunk toward PRIOR_BLUNDER_RATE with the same
-weight (so one clean decision cannot price every spot at 0), and a spot never reached still has
-expected blunders = 100 x freq x global rate and is drilled in proportion to its frequency.
-weight = normalized(expected_blunders_per_100 + C_EXPLORE * sqrt(ln N / (n + 1))).
-The solver part is cached in memory per (table, depth); `Line`s say how to deal a drill.
+Plan 14: rows are ranked by spot importance (pn.train.importance: freq x pot x (1 - score)^p,
+normalised to the top row; score = shrunk trainer accuracy) and drilled by
+weight = normalised(priority + exploration bonus); `Leaks.importance` adds the formation and texture
+tables. The Plan 7 blunder fields (blunder rate shrunk toward the global rate) stay on each row.
+The preflop part is cached in memory per (table, depth), the SolveCache scan until the cache
+directory changes (`Leaks.postflop`); `Line`s say how to deal a drill.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import re
 import sqlite3
 import threading
@@ -40,16 +38,16 @@ from pn.solve.backend import MULTIWAY_UNSOLVABLE
 from pn.solve.lazydoc import LazyDoc
 from pn.solve.library import library_path
 from pn.solve.request import TABLE_SEATS
-from pn.train import grading, spots
+from pn.train import importance as imp
 from pn.train import preflop as pre
-from pn.train.stats import decision_grade, ensure
+from pn.train import spots
+from pn.train.importance import C_EXPLORE, PRIOR_BLUNDER_RATE, PRIOR_N  # noqa: F401 (re-exported)
+from pn.train.stats import ensure
 
-PRIOR_N = 5.0  # prior strength: observations' worth of the global blunder rate
-PRIOR_BLUNDER_RATE = 0.2  # the global blunder rate before any graded decision exists
-C_EXPLORE = 0.5  # exploration bonus, in expected blunders per 100 hands
 MIN_FREQ = 0.0  # spots at or below this frequency per hand are not listed or drilled
 MIN_REACH = 1e-6  # prune tree walks below this path probability
 FIRST_FALLBACK = 1.0  # P(flop first | heads-up flop) without a solved flop or an observation
+_UNREAD = object()  # Leaks._read: a SolveCache entry whose .json is not written yet
 POSTFLOP = STREETS[1:]
 
 
@@ -86,6 +84,9 @@ class FreqMap:
     matchups: dict[str, float] = field(default_factory=dict)  # spots.line_key -> per hand
     # "post|<pot>|<ip|oop>" -> every heads-up flop line into it, highest reach first (gtow)
     post_lines: dict[str, tuple[Line, ...]] = field(default_factory=dict)
+    # heads-up flop formation (pn.train.importance.formation_label) -> per hand (hero seat uniform)
+    formations: dict[str, float] = field(default_factory=dict)
+    formation_lines: dict[str, Line] = field(default_factory=dict)  # its highest-reach line
 
 
 def token_kind(token: str) -> str:
@@ -150,6 +151,7 @@ def library_walk(doc: Mapping, min_reach: float = MIN_REACH) -> FreqMap:
     n = len(positions)
     freq: dict[str, float] = {}
     pairs: dict[str, float] = {}
+    forms: dict[str, float] = {}
     best: dict[str, tuple[float, Line]] = {}
 
     def keep(key: str, reach: float, line: Line) -> None:
@@ -167,6 +169,9 @@ def library_walk(doc: Mapping, min_reach: float = MIN_REACH) -> FreqMap:
             if node.get("kind") == "leaf" and len(live) == 2:  # heads-up flops only
                 mk = spots.line_key((x.position, x.kind) for x in steps)
                 pairs[mk] = pairs.get(mk, 0.0) + reach
+                fk = imp.formation_label(spots.pot_type(len(raisers)), live)
+                forms[fk] = forms.get(fk, 0.0) + 2 * reach / n
+                keep(f"form|{fk}", reach, Line(live[0], steps, ("lib_leaf", nid, positions.index(live[0])), doc))
                 for p in live:
                     pk = f"post|{spots.pot_type(len(raisers))}|{'ip' if spots.is_ip(p, live) else 'oop'}"
                     freq[pk] = freq.get(pk, 0.0) + reach / n
@@ -188,13 +193,34 @@ def library_walk(doc: Mapping, min_reach: float = MIN_REACH) -> FreqMap:
                           (*raisers, me) if kind in ("raise", "allin") else raisers,
                           limpers + (kind == "call" and not raisers),
                           folded | {me} if kind == "fold" else folded))  # fmt: skip
-    return FreqMap(freq, {k: line for k, (_, line) in best.items()}, "library", pairs)
+    lines = {k: line for k, (_, line) in best.items() if not k.startswith("form|")}
+    flines = {k[5:]: line for k, (_, line) in best.items() if k.startswith("form|")}
+    return FreqMap(freq, lines, "library", pairs, formations=forms, formation_lines=flines)
 
 
 # ------------------------------------------------------------------ preflop: GTO Wizard chains
 
 _OURS = gtowizard.GTOW_TO_OURS
 _THEIRS = {v: k for k, v in _OURS.items()}
+# 8-max seats in front of the 6-max table have no GTO Wizard name: their keys (PokerCoaching only,
+# 9-handed charts shifted one seat, pn.profile.charts) use these
+_EP_NAMES = {"UTG": "EP:UTG", "UTG1": "EP:UTG1"}
+_EP_SEATS = {v: k for k, v in _EP_NAMES.items()}
+
+
+def _name(pos: str) -> str:
+    """A seat's name in the walk's spot keys (GTO Wizard's for the 6-max seats)."""
+    return _EP_NAMES.get(pos) or _THEIRS[pos]
+
+
+def _pc_src(key: str, table: int, codes: tuple[str, ...]) -> tuple:
+    """Step.src of a PokerCoaching-only key (an 8-max EP seat acts or is faced):
+    ("pc", (table kind, situation kind, position, other), codes) for drills.sample_hands."""
+    kind, *names = key.split("|")
+    seats = [_EP_SEATS.get(x) or _OURS[x] for x in names]
+    pos, other = {"rfi": (seats[0], None), "vs_open": (seats[-1], seats[0]),
+                  "vs_3bet": (seats[0], seats[-1])}[kind]  # fmt: skip
+    return ("pc", (f"{table}max", kind, pos, other), codes)
 
 
 def _shares(cells: Mapping[str, Mapping[str, float]],
@@ -214,26 +240,28 @@ def _shares(cells: Mapping[str, Mapping[str, float]],
     return {k: v / total for k, v in acc.items()} if total else acc
 
 
-def pc_spot_table() -> dict[str, dict[str, float]]:
+def pc_spot_table(table: int = 6) -> dict[str, dict[str, float]]:
     """GTO Wizard 6-max spot keys (without depth) that the PokerCoaching charts cover: rfi
     (SB call = limp), vs_open and vs_3bet (over the opener's PokerCoaching open range). Pure
-    charts: each class plays the charted action at frequency 1."""
-    order = list(TABLE_SEATS[6])
+    charts: each class plays the charted action at frequency 1. 8-max adds the UTG / UTG1 keys
+    (`_EP_NAMES`)."""
+    order = list(TABLE_SEATS[table])
+    tk = f"{table}max"
     out: dict[str, dict[str, float]] = {}
     opens: dict[str, dict[str, float]] = {}
     for o in order[:-1]:
-        found = pre.pc_class_dists("6max", "rfi", o, None)
+        found = pre.pc_class_dists(tk, "rfi", o, None)
         if found is not None:
-            out[f"rfi|{_THEIRS[o]}"] = _shares(found[0])
+            out[f"rfi|{_name(o)}"] = _shares(found[0])
             opens[o] = {cls: d.get("R", 0.0) for cls, d in found[0].items()}
     for oi, o in enumerate(order[:-1]):
         for h in order[oi + 1 :]:
-            found = pre.pc_class_dists("6max", "vs_open", h, o)
+            found = pre.pc_class_dists(tk, "vs_open", h, o)
             if found is not None:
-                out[f"vs_open|{_THEIRS[o]}|{_THEIRS[h]}"] = _shares(found[0])
-            found = pre.pc_class_dists("6max", "vs_3bet", o, h)
+                out[f"vs_open|{_name(o)}|{_name(h)}"] = _shares(found[0])
+            found = pre.pc_class_dists(tk, "vs_3bet", o, h)
             if found is not None and o in opens:
-                out[f"vs_3bet|{_THEIRS[o]}|{_THEIRS[h]}"] = _shares(found[0], opens[o])
+                out[f"vs_3bet|{_name(o)}|{_name(h)}"] = _shares(found[0], opens[o])
     return out
 
 
@@ -244,11 +272,14 @@ def gtow_walk(freqs: Mapping, table: int, depth: int, *, pokercoaching: bool = T
     folds, 4-bet + call. Each key is read at the nearest depth that has it. The data has no
     open + call (squeeze) or 3-bet + cold-call nodes: players behind a caller fold with their
     vs_open / cold fold share, the opener facing 3-bet + cold call with its vs_3bet fold share.
-    Limp-isolation and 5-bet+ pots (all-in at these depths) are not counted. Empty for other
-    tables. Action shares are PokerCoaching first (`pc_spot_table`, as the solver's seat
+    Limp-isolation and 5-bet+ pots (all-in at these depths) are not counted. Plan 16, 8-max: the
+    same walk over 8 seats; UTG / UTG1 decisions (rfi, vs_open, vs_3bet) and the responses to
+    them come from the PokerCoaching 9-handed charts shifted one seat (pn.profile.charts), keys
+    without a chart (cold calls of an EP open's 3-bet, EP vs 4-bet, EP limps) count as folds /
+    zero reach. Once UTG and UTG1 fold the chains are the 6-max ones. Action shares are PokerCoaching first (`pc_spot_table`, as the solver's seat
     ranges), GTO Wizard where PokerCoaching has no chart (vs_limp, cold, vs_4bet and later);
     `pokercoaching=False` reads GTO Wizard only."""
-    if table != 6:
+    if table not in TABLE_SEATS:
         return FreqMap({}, {}, "none")
     depths = sorted({int(k.split("|")[0]) for k in freqs}, key=lambda d: (abs(d - depth), d))
     if not depths:
@@ -257,24 +288,30 @@ def gtow_walk(freqs: Mapping, table: int, depth: int, *, pokercoaching: bool = T
     for d in reversed(depths):  # the nearest depth last: it wins per key
         tab.update(gtowizard.spot_table(freqs, d))
     if pokercoaching:
-        tab.update(pc_spot_table())
-    order = list(TABLE_SEATS[6])
+        tab.update(pc_spot_table(table))
+    order = list(TABLE_SEATS[table])
+    n = len(order)
     freq: dict[str, float] = {}
     lines: dict[str, Line] = {}
     best: dict[str, float] = {}
     flops: dict[str, list[tuple[float, Line]]] = {}
+    forms: dict[str, float] = {}
+    flines: dict[str, tuple[float, Line]] = {}
 
     def share(key: str, action: str) -> float:
         return tab.get(key, {}).get(action, 0.0)
 
     def step(pos: str, kind: str, key: str, code: str) -> Step:
-        return Step(pos, kind, ("gtow", key, ("R", "A") if code == "R" else (code,)) if key in tab else ())
+        codes = ("R", "A") if code == "R" else (code,)
+        if key not in tab:
+            return Step(pos, kind, ())
+        return Step(pos, kind, _pc_src(key, table, codes) if "EP:" in key else ("gtow", key, codes))
 
     def folds(prefix: str, between: list[str]) -> tuple[float, list[Step]]:
         """Everyone in `between` folds at `<prefix><their seat>`."""
         p, steps = 1.0, []
         for x in between:
-            k = prefix + _THEIRS[x]
+            k = prefix + _name(x)
             p *= share(k, "fold") if k in tab else 1.0
             steps.append(step(x, "fold", k, "F"))
         return p, steps
@@ -282,7 +319,7 @@ def gtow_walk(freqs: Mapping, table: int, depth: int, *, pokercoaching: bool = T
     def add(key: str, me: str, reach: float, steps: list[Step]) -> None:
         if reach <= 0:
             return
-        freq[key] = freq.get(key, 0.0) + reach / 6
+        freq[key] = freq.get(key, 0.0) + reach / n
         if reach > best.get(key, 0.0):
             best[key] = reach
             lines[key] = Line(me, tuple(steps), ("gtow", ()))
@@ -293,9 +330,13 @@ def gtow_walk(freqs: Mapping, table: int, depth: int, *, pokercoaching: bool = T
             return
         folded = {s.position for s in steps if s.kind == "fold"}
         live = [p for p in dict.fromkeys(s.position for s in steps) if p not in folded]
+        fk = imp.formation_label(pot, live)
+        forms[fk] = forms.get(fk, 0.0) + 2 * reach / n
+        if reach > flines.get(fk, (0.0, None))[0]:
+            flines[fk] = (reach, Line(live[0], tuple(steps), ("gtow", ())))
         for p in live:
             pk = f"post|{pot}|{'ip' if spots.is_ip(p, live) else 'oop'}"
-            freq[pk] = freq.get(pk, 0.0) + reach / 6
+            freq[pk] = freq.get(pk, 0.0) + reach / n
             flops.setdefault(pk, []).append((reach, Line(p, tuple(steps), ("gtow", ()))))
 
     def spot(me: str, raisers: list[str], limpers: int = 0) -> str:
@@ -311,12 +352,12 @@ def gtow_walk(freqs: Mapping, table: int, depth: int, *, pokercoaching: bool = T
     flop("limped", p * share("rfi|SB", "call") * share("vs_limp|SB|BB", "check"),
          [*limp, step("BB", "check", "vs_limp|SB|BB", "X")])  # fmt: skip
     for oi, o in enumerate(order[:-1]):
-        O = _THEIRS[o]
+        O = _name(o)
         p_o, st_o = folds("rfi|", order[:oi])
         st_o = [*st_o, step(o, "raise", f"rfi|{O}", "R")]
         p_open = p_o * share(f"rfi|{O}", "raise")
         for hi in range(oi + 1, len(order)):  # vs_open / then the 3-bet wars
-            h, H = order[hi], _THEIRS[order[hi]]
+            h, H = order[hi], _name(order[hi])
             p_b, st_b = folds(f"vs_open|{O}|", order[oi + 1 : hi])
             reach = p_open * p_b
             add(spot(h, [o]), h, reach, [*st_o, *st_b])
@@ -329,9 +370,11 @@ def gtow_walk(freqs: Mapping, table: int, depth: int, *, pokercoaching: bool = T
             k3 = f"vs_3bet|{O}|{H}"
             for ci in range(hi + 1, len(order)):  # cold callers of the 3-bet
                 c = order[ci]
+                ck = f"cold|{O}|{H}|{_name(c)}"
+                if ck not in tab:  # no chart (an EP open's 3-bet): zero reach, as documented
+                    continue
                 p_c, st_c = folds(f"cold|{O}|{H}|", order[hi + 1 : ci])
                 add(spot(c, [o, h]), c, p3 * p_c, [*st3, *st_c])
-                ck = f"cold|{O}|{H}|{_THEIRS[c]}"
                 p_cf, st_cf = folds(f"cold|{O}|{H}|", order[ci + 1 :])
                 flop("3bp", p3 * p_c * share(ck, "call") * p_cf * share(k3, "fold"),
                      [*st3, *st_c, step(c, "call", ck, "C"), *st_cf, step(o, "fold", k3, "F")])  # fmt: skip
@@ -353,7 +396,8 @@ def gtow_walk(freqs: Mapping, table: int, depth: int, *, pokercoaching: bool = T
                 raisers = [*raisers, actor]
     post = {pk: tuple(line for _, line in sorted(c, key=lambda x: -x[0])) for pk, c in flops.items()}
     return FreqMap(freq, {**lines, **{pk: ls[0] for pk, ls in post.items()}}, "gtow",
-                   post_lines=post)
+                   post_lines=post, formations=forms,
+                   formation_lines={k: line for k, (_, line) in flines.items()})  # fmt: skip
 
 
 # ------------------------------------------------------------------ postflop conditionals
@@ -462,18 +506,12 @@ def _window_rows(conn: sqlite3.Connection, window: int, table: int, depth: int) 
     for k in range(0, len(hands), 500):
         chunk = hands[k : k + 500]
         cur = conn.execute(
-            "SELECT d.hand_uid, d.spot, d.chosen, d.options_json, d.grade, d.note, "
-            "h.drill_spot FROM train_decisions d JOIN train_hands h ON h.hand_uid = d.hand_uid "
+            "SELECT d.hand_uid, d.spot, d.street, d.chosen, d.options_json, d.grade, d.note, "
+            "d.board, d.pot_bb, d.formation, h.drill_spot FROM train_decisions d JOIN train_hands h ON h.hand_uid = d.hand_uid "
             f"WHERE d.hand_uid IN ({','.join('?' * len(chunk))})", chunk)  # fmt: skip
         cols = [c[0] for c in cur.description]
         rows += [dict(zip(cols, r, strict=True)) for r in cur]
     return rows
-
-
-def _blunder(row: Mapping[str, Any]) -> float | None:
-    """1.0 for a blunder, 0.0 for best / mixed, None when the decision was not graded."""
-    g = decision_grade(row)
-    return None if g is None else float(g == grading.BLUNDER)
 
 
 def observed_postflop(rows: list[dict]) -> tuple[dict[str, float], dict[str, float]]:
@@ -505,39 +543,12 @@ def observed_postflop(rows: list[dict]) -> tuple[dict[str, float], dict[str, flo
 # ------------------------------------------------------------------ the model
 
 
-def rank(freq: Mapping[str, float], rows: list[dict]) -> list[dict[str, Any]]:
-    """Leak rows over the spots with freq > MIN_FREQ, sorted by expected blunders per 100."""
-    n: dict[str, int] = {}
-    total: dict[str, float] = {}
-    for r in rows:
-        b = _blunder(r)
-        if b is None or not r["spot"]:
-            continue
-        n[r["spot"]] = n.get(r["spot"], 0) + 1
-        total[r["spot"]] = total.get(r["spot"], 0.0) + b
-    all_n = sum(n.values())
-    mean = (sum(total.values()) + PRIOR_N * PRIOR_BLUNDER_RATE) / (all_n + PRIOR_N)
-    universe = [s for s, f in freq.items() if f > MIN_FREQ]
-    big_n = max(sum(n.get(s, 0) for s in universe), 2)
-    out = []
-    for s in universe:
-        k = n.get(s, 0)
-        rate = (total.get(s, 0.0) + PRIOR_N * mean) / (k + PRIOR_N)
-        expected = 100.0 * freq[s] * rate
-        out.append({"spot": s, "label": spots.label(s), "freq": round(freq[s], 5), "n": k,
-                    "blunders": int(total.get(s, 0.0)), "blunder_rate": round(rate, 4),
-                    "expected_blunders_per_100": round(expected, 4),
-                    "_w": expected + C_EXPLORE * math.sqrt(math.log(big_n) / (k + 1))})  # fmt: skip
-    tot_w = sum(r["_w"] for r in out) or 1.0
-    for r in out:
-        r["weight"] = round(r.pop("_w") / tot_w, 5)
-    out.sort(key=lambda r: (-r["expected_blunders_per_100"], -r["weight"], -r["freq"], r["spot"]))
-    return out
-
-
 class Leaks:
     """Leak table and drill picks for the trainer. `library(table, depth)` returns the root
-    document or None; `cache_root` is the SolveCache directory scanned for street solves."""
+    document or None; `cache_root` is the SolveCache directory scanned for street solves.
+    The scan (postflop conditionals) runs once and is reused until the directory changes
+    (its mtime / size: SolveCache adds entries by rename); a cold scan of a full cache takes
+    minutes, so `wait=False` callers never scan inline (`postflop`)."""
 
     def __init__(self, db: str | Path | None, *,
                  library: Callable[[int, int], Mapping | None] | None = None,
@@ -548,11 +559,13 @@ class Leaks:
         self.gtow = freqs
         self._maps: dict[tuple[int, int], FreqMap] = {}
         self._docs: dict[Path, tuple[DocStats, ...] | None] = {}  # SolveCache entries read so far
-        self._lock = threading.Lock()
+        self._post: tuple[tuple[int, int] | None, dict[str, float]] | None = None  # (stamp, cond)
+        self._metas: dict[tuple[int, int], tuple[dict, dict]] = {}  # (table, depth) -> Leaks._meta
+        self._lock = threading.Lock()  # preflop maps
+        self._scan_lock = threading.Lock()  # one SolveCache scan at a time
 
-    def solver_map(self, table: int, depth: int) -> tuple[FreqMap, dict[str, float]]:
-        """(preflop map with lines, cached per (table, depth); postflop conditionals over the
-        SolveCache, reading only entries not seen before)."""
+    def _map(self, table: int, depth: int) -> FreqMap:
+        """The preflop map with lines, cached per (table, depth)."""
         with self._lock:
             fm = self._maps.get((table, depth))
             if fm is None:
@@ -563,30 +576,123 @@ class Leaks:
                     gt = self.gtow if self.gtow is not None else _gtow_freqs()
                     fm = gtow_walk(gt, table, depth)
                 self._maps[(table, depth)] = fm
-            if self.cache_root is not None and self.cache_root.exists():
-                for path in sorted(self.cache_root.glob("*.toml")):
-                    if path not in self._docs:
-                        self._docs[path] = doc_stats(path)
-            return fm, conditionals([d for ds in self._docs.values() if ds for d in ds])
+            return fm
+
+    def _stamp(self) -> tuple[int, int] | None:
+        """Changes whenever an entry is added, replaced or removed; None without a cache."""
+        if self.cache_root is None:
+            return None
+        try:
+            st = self.cache_root.stat()
+        except OSError:
+            return None
+        return st.st_mtime_ns, st.st_size
+
+    def postflop(self, *, wait: bool = True) -> dict[str, float] | None:
+        """Postflop conditionals over the SolveCache. Fresh: the cached result. Stale or cold:
+        `wait` scans now (reading only entries not seen before); otherwise a background scan
+        starts and the last result comes back (None before the first scan finishes)."""
+        post = self._post
+        if post is not None and post[0] == self._stamp():
+            return post[1]
+        if wait:
+            return self._scan()
+        if not self._scan_lock.locked():
+            threading.Thread(target=self._scan, name="leaks-scan", daemon=True).start()
+        return post[1] if post is not None else None
+
+    def _scan(self) -> dict[str, float]:
+        with self._scan_lock:
+            stamp = self._stamp()  # before the glob: a write during it triggers another scan
+            if self._post is not None and self._post[0] == stamp:
+                return self._post[1]
+            found = sorted(self.cache_root.glob("*.toml")) if stamp is not None else []
+            self._docs = {p: ds for p in found if (ds := self._read(p)) is not _UNREAD}
+            cond = conditionals([d for ds in self._docs.values() if ds for d in ds])
+            self._post = (stamp, cond)
+            return cond
+
+    def _read(self, p: Path) -> tuple[DocStats, ...] | None | object:
+        """The entry's stats, read once; _UNREAD while SolveCache has written its .toml but not
+        yet its .json (read again next scan). An entry replaced in place keeps its first stats
+        (they follow from the spot, which the key fixes; a stat per entry costs seconds)."""
+        if p in self._docs:
+            return self._docs[p]
+        ds = doc_stats(p)
+        return ds if ds is not None or p.with_suffix(".json").exists() else _UNREAD
+
+    def ready(self) -> bool:
+        """True once a scan has finished (starting one in the background if none has)."""
+        return self.postflop(wait=False) is not None
+
+    def solver_map(self, table: int, depth: int) -> tuple[FreqMap, dict[str, float]]:
+        """(preflop map with lines, postflop conditionals); see `postflop`."""
+        return self._map(table, depth), self.postflop() or {}
 
     def warm(self) -> None:
-        """Read the SolveCache entries now (the first scan takes seconds on a full cache)."""
+        """Scan the SolveCache now (minutes on a full cache: the web app runs it in a thread)."""
         self.solver_map(6, 100)
 
-    def rows(self, conn: sqlite3.Connection | None, table: int, depth: int,
-             window: int) -> list[dict[str, Any]]:  # fmt: skip
-        """The leak table (contracts/trainer.md GET /api/train/leaks) over the newest `window`
-        trainer hands at this table size and depth."""
+    def rows(self, conn: sqlite3.Connection | None, table: int, depth: int, window: int, *,
+             wait: bool = True, p_form: int = imp.P_FORM, p_tex: int = imp.P_TEX,
+             pot: str = "start") -> list[dict[str, Any]]:  # fmt: skip
+        """The spot rows of `importance` (contracts/trainer.md GET /api/train/leaks)."""
+        return self.importance(conn, table, depth, window, wait=wait, p_form=p_form, p_tex=p_tex,
+                               pot=pot)["spots"]  # fmt: skip
+
+    def importance(self, conn: sqlite3.Connection | None, table: int, depth: int, window: int, *,
+                   wait: bool = True, p_form: int = imp.P_FORM, p_tex: int = imp.P_TEX,
+                   pot: str = "start") -> dict[str, Any]:  # fmt: skip
+        """{spots, formations, textures, params} over the newest `window` trainer hands at this
+        table size and depth (contracts/trainer.md "Plan 14 additions"). `wait=False` uses the
+        last scan (before the first one: trainer observations and fallbacks only)."""
+        imp.check_params(p_form, p_tex, pot)
         if window < 1:
             raise ValueError("window must be >= 1")
-        return rank(self.frequencies(conn, table, depth, window)[0],
-                    _window_rows(conn, window, table, depth) if conn is not None else [])  # fmt: skip
-
-    def frequencies(self, conn: sqlite3.Connection | None, table: int, depth: int,
-                    window: int) -> tuple[dict[str, float], FreqMap]:  # fmt: skip
-        """Per-hand frequency of every spot (preflop and postflop) and the solver map."""
-        fm, cond = self.solver_map(table, depth)
         rows = _window_rows(conn, window, table, depth) if conn is not None else []
+        freq, fm = self.frequencies(conn, table, depth, window, wait=wait, rows=rows)
+        meta, form_pots = self._meta(table, depth, fm, freq)
+        spot_table = imp.spot_rows(freq, rows, meta, p=p_form, pot_mode=pot, min_freq=MIN_FREQ)
+        forms = imp.formation_rows(fm.formations, form_pots, rows, spot_table, p=p_form, pot_mode=pot)
+        start_pot = imp.mean_flop_pot(fm.formations, form_pots)
+        texs = imp.texture_rows(rows, imp.global_score(rows), start_pot=start_pot, p=p_tex, pot_mode=pot)
+        return {"spots": spot_table, "formations": forms, "textures": texs,
+                "params": {"p_form": p_form, "p_tex": p_tex, "pot": pot}}  # fmt: skip
+
+    def _meta(self, table: int, depth: int, fm: FreqMap, freq: Mapping[str, float],
+              ) -> tuple[dict[str, tuple[float, str | None]], dict[str, float]]:  # fmt: skip
+        """({spot: (start pot bb, formation)}, {formation: start pot bb}), replayed once per
+        spot / formation and cached per (table, depth)."""
+        with self._lock:
+            spot_meta, form_pots = self._metas.setdefault((table, depth), ({}, {}))
+            for label, line in fm.formation_lines.items():
+                if label not in form_pots:
+                    pot_bb = imp.line_pot_bb(line, table, depth, self.gtow)
+                    form_pots[label] = pot_bb if pot_bb is not None else imp.POT_PRIOR_BB[imp.pot_key(label)]
+            for s in freq:
+                if s not in spot_meta:
+                    spot_meta[s] = self._spot_meta(table, depth, fm, s)
+            return dict(spot_meta), dict(form_pots)
+
+    def _spot_meta(self, table: int, depth: int, fm: FreqMap, spot: str) -> tuple[float, str | None]:
+        if not spot.startswith("post|"):
+            line = fm.lines.get(spot)
+            pot_bb = imp.line_pot_bb(line, table, depth, self.gtow) if line is not None else None
+            return (pot_bb if pot_bb is not None else imp.PREFLOP_POT_BB), imp.spot_formation(spot)
+        key = "|".join(spot.split("|")[:3])
+        line = fm.post_lines[key][0] if fm.post_lines.get(key) else fm.lines.get(key)
+        form = imp.line_formation(line) if line is not None else None
+        pot_bb = imp.line_pot_bb(line, table, depth, self.gtow) if line is not None else None
+        return (pot_bb if pot_bb is not None else imp.POT_PRIOR_BB[spot.split("|")[1]]), form
+
+    def frequencies(self, conn: sqlite3.Connection | None, table: int, depth: int, window: int,
+                    *, wait: bool = True, rows: list[dict] | None = None,
+                    ) -> tuple[dict[str, float], FreqMap]:  # fmt: skip
+        """Per-hand frequency of every spot (preflop and postflop) and the solver map."""
+        fm = self._map(table, depth)
+        cond = self.postflop(wait=wait) or {}
+        if rows is None:
+            rows = _window_rows(conn, window, table, depth) if conn is not None else []
         obs_pre, obs_cond = observed_postflop(rows)
         freq = {k: v for k, v in fm.freq.items() if k.startswith("pf|")}
         pre = {k: v for k, v in fm.freq.items() if k.startswith("post|")} or obs_pre
@@ -601,6 +707,10 @@ class Leaks:
                         freq[key] = p * c
         return freq, fm
 
+    def formation_line(self, table: int, depth: int, formation: str) -> Line | None:
+        """The highest-reach line into a heads-up flop formation (None when not reached)."""
+        return self._map(table, depth).formation_lines.get(formation)
+
     def line(self, table: int, depth: int, spot: str) -> Line | None:
         ls = self.lines(table, depth, spot)
         return ls[0] if ls else None
@@ -608,7 +718,7 @@ class Leaks:
     def lines(self, table: int, depth: int, spot: str) -> tuple[Line, ...]:
         """Every known line into the spot, highest reach first (postflop spots: the heads-up
         flop lines of its pot and side; one line elsewhere)."""
-        fm, _ = self.solver_map(table, depth)
+        fm = self._map(table, depth)
         key = "|".join(spot.split("|")[:3]) if spot.startswith("post|") else spot
         if key in fm.post_lines:
             return fm.post_lines[key]

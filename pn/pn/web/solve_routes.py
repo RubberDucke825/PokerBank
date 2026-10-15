@@ -1,6 +1,6 @@
 """Strategy-tab solve API (contracts/trainer.md "Root solves and subgames", Plan 7 study UI):
 new spots, jobs with live progress and cancel, subgames, the saved-solves library, delete,
-ranges at a node, the preflop line catalog and the solve presets."""
+ranges and range equity at a node, the preflop line catalog and the solve presets."""
 
 from __future__ import annotations
 
@@ -9,16 +9,20 @@ import json
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from pn import ranges
 from pn.solve import SolveCache, SolveError
 from pn.solve.library import library_path
 from pn.solve.request import parse_board, solve_preset
+from pn.solve.subgame import SubgameError, path_to
 from pn.web import study
+from pn.web.equity import range_equity
 from pn.web.jobs import JobFinished, JobNotFound, Jobs
 from pn.web.solves import (
     NEW_SPOT_PRESET,
     Registry,
     SeatSpec,
     SolveNotFound,
+    board_of,
     check_cards,
     prepare_spot,
     solve_prepared,
@@ -181,12 +185,48 @@ def solves_line(line: str, positions: str, table: int = 6, depth: int = 100) -> 
 
 
 @router.get("/api/solves/{name}/ranges")
-def solves_ranges(name: str, request: Request, path: str = "") -> Response:
+def solves_ranges(name: str, request: Request, path: str = "", node: str = "") -> Response:
+    """Both players' reach at the node at `path`, or at node id `node` (trainer grid_ref)."""
     reg = _solve_ctx(request)[0]
     try:
-        return _raw(study.node_ranges(reg.get(name), [t for t in path.split(",") if t]))
+        doc = reg.get(name)
+        return _raw(study.node_ranges(doc, _tokens(doc, path, node)))
     except SolveNotFound as e:
         raise HTTPException(404, str(e)) from e
+
+
+def _tokens(doc: dict, path: str, node: str) -> list[str]:
+    """Path tokens from `path`, or walked up from node id `node` (SolveNotFound if unknown)."""
+    if not node:
+        return [t for t in path.split(",") if t]
+    try:
+        return [tok for _, tok in path_to(doc, node)]
+    except SubgameError as e:
+        raise SolveNotFound(str(e)) from e
+
+
+@router.get("/api/solves/{name}/equity")
+def solves_equity(name: str, request: Request, path: str = "", node: str = "") -> Response:
+    """Hand-vs-range equity of both players at the node (contracts/strategy_output.md); reach
+    comes from the /ranges walk (`node` as there), the board is the solve's plus the chance cards on the path."""
+    reg = _solve_ctx(request)[0]
+    try:
+        doc = reg.get(name)
+        tokens = _tokens(doc, path, node)
+        rng = study.node_ranges(doc, tokens)
+    except SolveNotFound as e:
+        raise HTTPException(404, str(e)) from e
+    board = [*board_of(doc), *(t for t in tokens if _is_card(t))]
+    try:
+        return _raw(range_equity(board, [p["reach"] for p in rng["players"]],
+                                 [p["position"] for p in rng["players"]]))  # fmt: skip
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+
+
+def _is_card(tok: str) -> bool:
+    """Chance tokens are card strings; action tokens (check, bet33, allin, ...) never are."""
+    return len(tok) == 2 and tok[0] in ranges.RANKS and tok[1] in ranges.SUITS
 
 
 @router.delete("/api/solves/{name}")

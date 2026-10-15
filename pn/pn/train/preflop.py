@@ -149,21 +149,21 @@ def pc_other(kind: str, seats: tuple[str, ...]) -> str | None:
 
 
 def pc_dist(table: str, kind: str | None, position: str, other: str | None,
-            combo: str) -> tuple[dict[str, float], str] | None:  # fmt: skip
+            combo: str, players: int | None = None) -> tuple[dict[str, float], str] | None:  # fmt: skip
     """(code -> frequency, chart key) from the PokerCoaching charts, or None when they do not
     cover the spot (the first action's chart is missing: vs 4-bet and later, cold calls,
-    squeezes, BB vs SB limp, heads-up, ...)."""
+    squeezes, BB vs SB limp, heads-up, ...). `players`: as charts.pc_key."""
     steps = PC_STEPS.get(kind or "")
     if steps is None:
         return None
-    key = charts.pc_key(table, steps[0][1], position, other)
-    if key is None or charts.pc_range(table, steps[0][1], position, other) is None:
+    key = charts.pc_key(table, steps[0][1], position, other, players=players)
+    if key is None or charts.pc_range(table, steps[0][1], position, other, players=players) is None:
         return None
     combo = ranges.canonical_combo(combo)
     dist: dict[str, float] = {}
     left = 1.0
     for code, action in steps:
-        rng = charts.pc_range(table, action, position, other) or {}
+        rng = charts.pc_range(table, action, position, other, players=players) or {}
         w = float(rng.get(combo, 0.0)) * left
         if w > 0:
             dist[code] = dist.get(code, 0.0) + w

@@ -13,8 +13,8 @@ on:
         description: solve minutes per shard before packing up (job limit is 360)
         default: "330"
       args:
-        description: pn library fill arguments
-        default: "--configs 0 --flops 50 --pots srp --pots 3bp --pots 4bp+ --accuracy 1"
+        description: pn library fill arguments (Plan 16, forward; the GCP boxes add --reverse)
+        default: "--configs 0 --subset 184 --lib 8x100 --lib 6x200 --lib 8x200 --new-only --accuracy 1 --depth-accuracy 200=2"
 
 jobs:
   plan:

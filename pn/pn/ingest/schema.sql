@@ -140,5 +140,8 @@ CREATE TABLE IF NOT EXISTS train_decisions (
     pure         INTEGER NOT NULL DEFAULT 0,
     spot         TEXT,                     -- Plan 6: pn.train.spots.spot_key
     note         TEXT,                     -- e.g. solver_unavailable (decision not graded)
+    board        TEXT,                     -- Plan 14: board cards at the decision ("Kd7s2c"), NULL preflop
+    pot_bb       REAL,                     -- Plan 14: pot at the decision in bb
+    formation    TEXT,                     -- Plan 14: "BTN vs BB - SRP" on heads-up postflop streets
     PRIMARY KEY (hand_uid, seq)
 );

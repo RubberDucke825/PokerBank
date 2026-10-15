@@ -143,3 +143,77 @@ export function startRouter() {
 }
 
 export const link = (href, ...children) => h("a", { href, "data-link": true }, ...children);
+
+// ------------------------------------------------------------------ toast, shortcuts sheet, keys
+const TOAST_MS = 2200;
+let toastEl = null, toastTimer = 0;
+/** toast("Saved") -> bottom-centre status line, auto-hides after 2.2 s; a new toast replaces the current one. */
+export function toast(msg) {
+  if (!toastEl) {
+    toastEl = h("div", { class: "toast", role: "status", "aria-live": "polite", "aria-atomic": "true" });
+    document.body.append(toastEl);
+  }
+  clearTimeout(toastTimer);
+  toastEl.classList.remove("is-on");
+  toastEl.textContent = String(msg);
+  void toastEl.offsetWidth; // restart the enter animation
+  toastEl.classList.add("is-on");
+  toastTimer = setTimeout(() => toastEl.classList.remove("is-on"), TOAST_MS);
+}
+
+let sheetClose = null;
+/** shortcutsSheet([{title, rows: [[keys, desc]]}]) -> close(). keys: "N" or ["N", "Space"] (one kbd each).
+ *  Modal; click outside, Esc or the ESC button closes; focus returns to where it was. */
+export function shortcutsSheet(sections) {
+  if (sheetClose) sheetClose();
+  const back = document.activeElement;
+  const btn = h("button", { type: "button", class: "sheet-close", "aria-label": "Close shortcuts" }, "Esc");
+  const body = (sections || []).map((s) => h("section", { class: "sheet-sec" },
+    s.title ? h("h2", { class: "sheet-title" }, s.title) : null,
+    h("dl", { class: "sheet-rows" }, (s.rows || []).map(([keys, desc]) => [
+      h("dt", {}, (Array.isArray(keys) ? keys : [keys]).map((k) => h("kbd", {}, k))),
+      h("dd", {}, desc)]))));
+  const dialog = h("div", { class: "sheet", role: "dialog", "aria-modal": "true", "aria-label": "Keyboard shortcuts" },
+    h("div", { class: "sheet-head" }, h("span", { class: "sheet-kicker" }, "Shortcuts"), btn), body);
+  const scrim = h("div", { class: "sheet-scrim" }, dialog);
+  const onKey = (e) => {
+    if (e.key === "Escape" || e.key === "?") { e.preventDefault(); e.stopImmediatePropagation(); close(); }
+    else if (e.key === "Tab") { e.preventDefault(); btn.focus(); } // single focusable: keep focus inside
+  };
+  function close() {
+    if (sheetClose !== close) return;
+    sheetClose = null;
+    document.removeEventListener("keydown", onKey, true);
+    scrim.remove();
+    if (back && back.isConnected) back.focus({ preventScroll: true });
+  }
+  scrim.addEventListener("click", (e) => { if (e.target === scrim) close(); });
+  btn.addEventListener("click", close);
+  document.addEventListener("keydown", onKey, true);
+  document.body.append(scrim);
+  sheetClose = close;
+  btn.focus({ preventScroll: true });
+  return close;
+}
+
+/** onKeys((e) => ..., root?) -> unregister(). Document keydown, skipped while typing in a field, with
+ *  Cmd/Ctrl/Alt held, or while the shortcuts sheet is open. With `root`, it also unregisters itself on the
+ *  first key after root leaves the DOM (the router replaces views without a teardown hook); keys pressed
+ *  before root is first inserted are ignored, not treated as a teardown. */
+export function onKeys(handler, root) {
+  let seen = false;  // root may not be inserted yet while the router awaits the view's render
+  const onKey = (e) => {
+    if (root) {
+      if (root.isConnected) seen = true;
+      else if (seen) { off(); return; }
+      else return;
+    }
+    if (sheetClose || e.metaKey || e.ctrlKey || e.altKey) return;
+    const t = e.target;
+    if (t instanceof Element && (t.closest("input, select, textarea") || t.isContentEditable)) return;
+    handler(e);
+  };
+  const off = () => document.removeEventListener("keydown", onKey);
+  document.addEventListener("keydown", onKey);
+  return off;
+}

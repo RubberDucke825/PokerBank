@@ -63,16 +63,17 @@ export const mixBar = (freqs, colors, cls = "mix-bar") => {
 
 /**
  * Range composition by made hand and draw for a combo weight vector (`reach`), with the action mix
- * inside each category when `node` is the player's own action node. Rows: {key, kind, w, share,
- * mix[]}; `total` = weighted combos.
+ * inside each category when `node` is the player's own action node. Board-blocked combos are skipped.
+ * Rows: {key, kind, w, share, mix[]}; `total` = weighted combos.
  */
 export function composition(combos, reach, board, node = null) {
   const rows = new Map();
   let total = 0;
   const n = node && node.actions ? node.actions.length : 0;
+  const dead = new Set(board);
   combos.forEach((c, i) => {
     const w = reach ? reach[i] || 0 : 0;
-    if (w <= 0) return;
+    if (w <= 0 || dead.has(c.slice(0, 2)) || dead.has(c.slice(2, 4))) return;
     total += w;
     const hc = classify(c, board);
     for (const [key, kind] of [[hc.made, "made"], ...hc.draws.map((d) => [d, "draw"])]) {
@@ -104,6 +105,20 @@ export function compositionPanel({ comp, colors, title, active, onPick }) {
     h("div", { class: "head" }, h("span", { class: "label" }, title), h("span", { class: "muted mono" }, `${num(comp.total, 0)} combos`)),
     made.length ? h("div", { class: "comp-list" }, made.map(row)) : h("p", { class: "note" }, "Empty range."),
     draws.length ? [h("span", { class: "label comp-sub" }, "Draws"), h("div", { class: "comp-list" }, draws.map(row))] : null);
+}
+
+/**
+ * "SHOWING" row above the grid: one pill per active filter ({label, swatch, onClear}) with its own
+ * clear button, then the Esc hint. Null when nothing is active.
+ */
+export function filterChips(chips) {
+  if (!chips.length) return null;
+  return h("div", { class: "filter-chips", role: "group", "aria-label": "Active filters" },
+    h("span", { class: "label" }, "Showing"),
+    chips.map((c) => h("span", { class: "fchip" },
+      h("span", { class: "fchip-sw", style: { background: c.swatch }, "aria-hidden": "true" }), c.label,
+      h("button", { type: "button", class: "fchip-x", "aria-label": `Clear ${c.label}`, onclick: c.onClear }, "×"))),
+    h("span", { class: "st-hint" }, h("kbd", {}, "Esc"), " clears"));
 }
 
 /** Solve facts: engine, iterations, exploitability, wall time, nodes (no EV fields). */

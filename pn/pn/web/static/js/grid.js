@@ -57,9 +57,11 @@ export function cellBackground(segments, weight, { fill } = {}) {
  * cells: {cls: {weight: 0..1, segments: [{freq, color}], label?: string}}
  * opts.onFocus(cls, el) / opts.onBlur() for hover + keyboard focus, opts.caption for a11y,
  * opts.fill passed to cellBackground, opts.class a modifier class on the grid (e.g. "gw").
+ * opts.selected: a pinned class; its cell gets .is-selected and the grid .has-pin (CSS dims the rest).
  */
 export function renderGrid(cells, opts = {}) {
-  const grid = h("div", { class: opts.class ? `grid13 ${opts.class}` : "grid13", role: "grid", "aria-label": opts.caption || "Hand grid" });
+  const klass = ["grid13", opts.class, opts.selected ? "has-pin" : null].filter(Boolean).join(" ");
+  const grid = h("div", { class: klass, role: "grid", "aria-label": opts.caption || "Hand grid" });
   const els = [];
   for (let i = 0; i < 13; i++) {
     const row = h("div", { class: "grid-row", role: "row" });
@@ -69,7 +71,8 @@ export function renderGrid(cells, opts = {}) {
       const style = c ? cellBackground(c.segments, c.weight, { fill: opts.fill }) : "";
       const kind = i === j ? "pair" : i < j ? "suited" : "offsuit";
       const el = h("div", {
-        class: `cell ${kind}${c ? "" : " empty"}`, role: "gridcell", tabindex: i === 0 && j === 0 ? 0 : -1,
+        class: `cell ${kind}${c ? "" : " empty"}${opts.selected === cls ? " is-selected" : ""}`, role: "gridcell",
+        "aria-selected": opts.selected ? String(opts.selected === cls) : null, tabindex: (opts.selected ? opts.selected === cls : i === 0 && j === 0) ? 0 : -1,
         "aria-label": c && c.label ? `${cls}: ${c.label}` : cls, dataset: { cls, i, j }, style,
       }, h("span", { class: "cell-name" }, cls), c && c.sub ? h("span", { class: "cell-sub" }, c.sub) : null);
       els.push(el);

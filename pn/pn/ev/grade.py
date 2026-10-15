@@ -123,10 +123,10 @@ def pc_kinds(hand: Mapping[str, Any], dec: GradableDecision) -> dict[str, float]
     if dec.situ is None:
         return None
     kind, *seats = dec.situ
-    table = charts.table_kind(len(hand["players"]))
+    n = len(hand["players"])
     actor = seats[0] if kind in ("vs_3bet", "limp_vs_raise") else seats[-1]
     other = train_preflop.pc_other(kind, tuple(seats))
-    found = train_preflop.pc_dist(table, kind, actor, other, dec.combo)
+    found = train_preflop.pc_dist(charts.table_kind(n), kind, actor, other, dec.combo, n)
     if found is None:
         return None
     out: dict[str, float] = {}

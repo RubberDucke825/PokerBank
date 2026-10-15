@@ -211,3 +211,31 @@ td.reason { white-space: normal !important; min-width: 18rem; }
 .seg-opt:active { transform: translateY(1px); }
 @media (max-width: 700px) { .seg { display: flex; width: 100%; } .seg-opt { flex: 1 1 0; min-height: 44px; padding: 0.4rem 0.5rem; } }
 @media (prefers-reduced-motion: reduce) { .seg-opt:active { transform: none; } }
+
+/* ------------------------------------------------------------ toast, shortcuts sheet, kbd (core.js) */
+@keyframes fade-up { from { transform: translateY(6px); opacity: 0; } }
+.toast {
+  position: fixed; left: 50%; bottom: 24px; z-index: 65; max-width: min(92vw, 30rem); transform: translateX(-50%);
+  padding: 10px 16px; background: var(--bg-3); border: 1px solid var(--line-2); border-radius: var(--radius);
+  font-size: var(--text-sm); color: var(--ink); box-shadow: var(--shadow-card); visibility: hidden; opacity: 0;
+}
+.toast.is-on { visibility: visible; opacity: 1; animation: toast-in 200ms var(--ease); }
+@keyframes toast-in { from { transform: translate(-50%, 6px); opacity: 0; } }
+.sheet-scrim { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / 0.55); }
+.sheet {
+  width: min(100%, 30rem); max-height: calc(100vh - 32px); overflow-y: auto; display: flex; flex-direction: column; gap: var(--s4);
+  padding: 20px; background: var(--bg-1); border: 1px solid var(--line-2); border-radius: var(--radius); animation: fade-up 180ms var(--ease);
+}
+.sheet-head { display: flex; justify-content: space-between; align-items: baseline; }
+.sheet-kicker, .sheet-title { margin: 0; font: 400 var(--text-xs)/1 var(--font-mono); letter-spacing: var(--track); text-transform: uppercase; color: var(--ink-3); }
+.sheet-close { min-height: 32px; padding: 0 var(--s2); background: none; border: 0; border-radius: var(--radius); color: var(--ink-2); cursor: pointer; font: 400 var(--text-xs) var(--font-mono); letter-spacing: var(--track); text-transform: uppercase; }
+.sheet-close:hover { color: var(--ink); }
+.sheet-close:focus-visible { outline: none; box-shadow: var(--focus); }
+.sheet-sec { display: flex; flex-direction: column; gap: 10px; }
+.sheet-rows { display: grid; grid-template-columns: max-content 1fr; gap: 10px 16px; margin: 0; font-size: var(--text-sm); }
+.sheet-rows dt { display: flex; flex-wrap: wrap; gap: 4px; }
+.sheet-rows dd { margin: 0; color: var(--ink-2); }
+.sheet kbd { background: var(--bg-3); color: var(--ink); border: 1px solid var(--line-2); }
+/* inverted key hint (Deal button): page background, accent text */
+kbd.kbd-inv { background: var(--bg-0); color: var(--accent); }
+/* chip pressed state lives in strategy.css (.chip[aria-pressed="true"]), loaded on every page */

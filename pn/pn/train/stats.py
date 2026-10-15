@@ -25,21 +25,33 @@ HAND_COLS = ("hand_uid", "session_id", "played_at", "table_size", "depth", "sour
              "net_bb", "opponents_json", "drill_spot", "drill_landed")  # fmt: skip
 DECISION_COLS = ("hand_uid", "seq", "street", "position", "situation", "hand_class", "rng",
                  "options_json", "chosen", "rng_action", "best", "loss_bb", "grade",
-                 "matched_rng", "pure", "spot", "note")  # fmt: skip
-ADDED_COLUMNS = {  # columns added after the tables first shipped (Plan 6)
+                 "matched_rng", "pure", "spot", "note", "board", "pot_bb", "formation")  # fmt: skip
+ADDED_COLUMNS = {  # columns added after the tables first shipped (Plan 6, Plan 14)
     "train_hands": {"drill_spot": "TEXT", "drill_landed": "INTEGER"},
-    "train_decisions": {"spot": "TEXT", "note": "TEXT"},
+    "train_decisions": {"spot": "TEXT", "note": "TEXT", "board": "TEXT", "pot_bb": "REAL",
+                        "formation": "TEXT"},
 }
+BB_CENTS = 100  # trainer big blind (feedback amounts are in cents)
 
 
 def ensure(conn: sqlite3.Connection) -> None:
-    """ALTER the Plan 6 columns into databases created before them."""
+    """ALTER the Plan 6 / Plan 14 columns into databases created before them (older rows keep
+    NULL). Safe when another connection migrates at the same time."""
     for table, cols in ADDED_COLUMNS.items():
-        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        have = _columns(conn, table)
         for col, kind in cols.items():
-            if col not in have:
+            if col in have:
+                continue
+            try:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {kind}")
+            except sqlite3.OperationalError:
+                if col not in _columns(conn, table):  # not a concurrent ALTER: a real failure
+                    raise
     conn.commit()
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def situation_kind(st: State, i: int) -> str:
@@ -164,12 +176,18 @@ def totals(stats: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def decision_row(hand_uid: str, seq: int, feedback: Mapping[str, Any], situation: str,
-                 hand_class: str, spot: str | None = None) -> dict[str, Any]:  # fmt: skip
-    """train_decisions row from a hero feedback dict."""
+                 hand_class: str, spot: str | None = None,
+                 formation: str | None = None) -> dict[str, Any]:  # fmt: skip
+    """train_decisions row from a hero feedback dict (Plan 14: the board postflop, the pot in bb
+    and the heads-up formation postflop)."""
+    board = "".join(feedback.get("board") or ()) if feedback["street"] != "preflop" else ""
+    pot = feedback.get("pot")
     return {"hand_uid": hand_uid, "seq": seq, "street": feedback["street"],
             "position": feedback["position"], "situation": situation, "hand_class": hand_class,
             "rng": feedback["rng"], "options_json": json.dumps(feedback["options"]),
             "chosen": feedback["chosen"], "rng_action": feedback["rng_action"],
             "best": feedback["best"], "loss_bb": feedback["loss_bb"], "grade": feedback["grade"],
             "matched_rng": None if feedback["matched_rng"] is None else int(feedback["matched_rng"]),
-            "pure": int(feedback["pure"]), "spot": spot, "note": feedback.get("note")}  # fmt: skip
+            "pure": int(feedback["pure"]), "spot": spot, "note": feedback.get("note"),
+            "board": board or None, "pot_bb": None if pot is None else pot / BB_CENTS,
+            "formation": formation if feedback["street"] != "preflop" else None}  # fmt: skip

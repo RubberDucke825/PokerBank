@@ -10,7 +10,10 @@ flops only from boards whose texas (TexasSolver) flop document is cached.
   seats, no dead hero cards, hero flag on the preflop aggressor, else the IP seat); the cached
   document's key is spot_key of it with the `library` solve preset.
 - `FlopIndex`: `<cache root>/hu_flop_library.json`, matchup id -> solved boards (board ->
-  {key, weight}); written by the library fill, read by the trainer.
+  {key, weight}); written by the library fill, read by the trainer. Plan 16: an entry may be an
+  alias `{alias_of: <mid>}` (an 8-max line without UTG/UTG1 action -> the 6-max matchup of the
+  same line, whose flop keys are identical; pn.train.library_alias): boards() / accuracy() /
+  pick_board read the target's boards.
 - `pick_board`: one solved board serves its whole suit-isomorphism class: it is dealt under a
   suit permutation that avoids the live hole cards (`Pick.perm`, pn.train.suitmap); the hand
   reads the document through the inverse permutation.
@@ -20,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import threading
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -178,7 +182,8 @@ def flop_spot(m: Matchup, board: tuple[str, ...],
 
 class FlopIndex:
     """`<root>/hu_flop_library.json`: {"matchups": {mid: {label, pot, positions, depth,
-    boards: {board: {key, weight, accuracy?}}}}}; re-read when the file changes. `accuracy`
+    boards: {board: {key, weight, accuracy?}}} | {label, ..., alias_of: <mid>}}}; re-read when
+    the file changes. `accuracy`
     (% of pot) is the solve's target when the fill recorded it (Plan 10 accuracy passes)."""
 
     def __init__(self, root: Path) -> None:
@@ -205,20 +210,54 @@ class FlopIndex:
                 self._mtime = mtime
             return self._data
 
+    def alias_of(self, mid: str) -> str | None:
+        """The matchup id an alias entry reads its boards from (None: not an alias)."""
+        return self.load()["matchups"].get(mid, {}).get("alias_of")
+
     def boards(self, mid: str) -> dict[str, dict[str, Any]]:
-        return dict(self.load()["matchups"].get(mid, {}).get("boards", {}))
+        """Solved boards of a matchup; an alias returns its target's (one level)."""
+        ms = self.load()["matchups"]
+        entry = ms.get(mid, {})
+        if "alias_of" in entry:
+            entry = ms.get(entry["alias_of"], {})
+        return dict(entry.get("boards", {}))
 
     def record(self, m: Matchup, board: str, key: str, weight: int,
-               accuracy: float | None = None) -> None:  # fmt: skip
+               accuracy: float | None = None, subset: int | None = None) -> None:  # fmt: skip
+        """Record a solved board. A new entry carries the table kind (labels do not: 6-max and
+        8-max lines share them); `subset` (Plan 16: the flop subset size the fill plans) is
+        written on the entry when given."""
         data = self._batch if self._batch is not None else json.loads(json.dumps(self.load()))
+        if "alias_of" in data["matchups"].get(m.mid, {}):
+            raise ValueError(f"{m.label} is an alias: its boards are the target's")
         entry = data["matchups"].setdefault(m.mid, {"label": m.label, "pot": m.pot,
                                                     "positions": list(m.positions),
-                                                    "depth": m.depth, "boards": {}})  # fmt: skip
+                                                    "depth": m.depth, "table": m.table_kind,
+                                                    "boards": {}})  # fmt: skip
+        if subset is not None:
+            entry["subset"] = subset
         entry["boards"][board] = {"key": key, "weight": weight}
         if accuracy is not None:
             entry["boards"][board]["accuracy"] = accuracy
         if self._batch is None:
             self._write(data)
+
+    def alias(self, m: Matchup, target: str) -> bool:
+        """Record `m` as an alias of matchup id `target` (the caller checks the flop keys first:
+        pn.train.library_alias). False when it already is one; ValueError when `m` has boards of
+        its own, is `target`, or `target` is an alias itself."""
+        data = self._batch if self._batch is not None else json.loads(json.dumps(self.load()))
+        ms = data["matchups"]
+        cur = ms.get(m.mid, {})
+        if cur.get("alias_of") == target:
+            return False
+        if target == m.mid or "alias_of" in ms.get(target, {}) or cur.get("boards"):
+            raise ValueError(f"cannot alias {m.label} to {target}")
+        ms[m.mid] = {"label": m.label, "pot": m.pot, "positions": list(m.positions),
+                     "depth": m.depth, "table": m.table_kind, "alias_of": target}  # fmt: skip
+        if self._batch is None:
+            self._write(data)
+        return True
 
     @contextmanager
     def batch(self) -> Iterator[None]:
@@ -242,25 +281,37 @@ class FlopIndex:
     def rekey(self, ms: Sequence[Matchup]) -> int:
         """Move entries recorded under an old matchup id to the current id of the same label
         (the id hashes the SpotRequest, so a request-shape change strands the index). Boards
-        already under the current id win; returns the number of entries moved."""
-        by_label = {m.label: m.mid for m in ms}
+        already under the current id win; returns the number of entries moved. Only entries of
+        the same table kind move (an entry without one is a 6-max entry, written before Plan 16);
+        alias entries pointing at a moved id are repointed to its new id."""
+        by_label = {(m.table_kind, m.label): m.mid for m in ms}
         data = json.loads(json.dumps(self.load()))
         moved = 0
+        renamed: dict[str, str] = {}  # old id -> new id, for the alias_of pointers
         for mid, entry in list(data["matchups"].items()):
-            new = by_label.get(entry.get("label"))
+            new = by_label.get((entry.get("table", "6max"), entry.get("label")))
             if new is None or new == mid:
+                continue
+            renamed[mid] = new
+            if "alias_of" in entry:  # an alias moves as is (an entry under the new id wins)
+                data["matchups"].setdefault(new, entry)
+                del data["matchups"][mid]
+                moved += 1
                 continue
             target = data["matchups"].setdefault(new, {**entry, "boards": {}})
             target["boards"] = {**entry["boards"], **target["boards"]}
             del data["matchups"][mid]
             moved += 1
+        for entry in data["matchups"].values():  # an alias follows its moved target
+            if entry.get("alias_of") in renamed:
+                entry["alias_of"] = renamed[entry["alias_of"]]
         if moved:
             self._write(data)
         return moved
 
     def _write(self, data: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
+        tmp = self.path.with_suffix(f".{os.getpid()}.tmp")  # two writers never share one
         tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
         tmp.replace(self.path)
 

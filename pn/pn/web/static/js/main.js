@@ -10,6 +10,7 @@ import { strategyNewView } from "./views/strategy_new.js";
 import { strategyLibraryView } from "./views/strategy_library.js";
 import { studyView } from "./views/study.js";
 import { trainView } from "./views/train.js";
+import { performanceView } from "./views/performance.js";
 
 route("/", homeView, "home");
 route("/players", playersView, "players");
@@ -20,6 +21,7 @@ route("/hands", handsView, "hands");
 route("/hands/:hand_id", handView, "hands");
 route("/charts", chartsView, "charts"); // unlinked: the trainer drawer shows these grids
 route("/train", trainView, "train");
+route("/train/performance", performanceView, "train");
 route("/strategy", studyView, "strategy");
 route("/strategy/library", strategyLibraryView, "strategy"); // before /strategy/:name (first match wins)
 route("/strategy/new", strategyNewView, "strategy");

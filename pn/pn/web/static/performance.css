@@ -1,0 +1,126 @@
+/* Trainer performance page (Plan 15, js/views/performance.js + perf_heatmap.js). Ledger tokens only.
+   Heatmap colour: diverging 5-step closeness scale --bad -> --warn -> --good mixed into the plate colour (plan:
+   "--bad through --warn to --good"), so leaks are the most salient cells, never confused with the neutral
+   ungraded / thin plate. Every step keeps the % and count text >= 4.5:1 in both themes (checked against tokens.css).
+   --pf-ink-strong is the text colour on the top step (component variable, not a token). */
+
+.pf-page { --pf-ink-strong: var(--bg-0); }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .pf-page { --pf-ink-strong: var(--ink); } }
+:root[data-theme="light"] .pf-page { --pf-ink-strong: var(--ink); }
+
+.pf-page .page-meta a { color: var(--accent); }
+.pf-filters { align-items: center; gap: var(--s3) var(--s5); }
+.pf-filter { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.pf-filter .seg-opt { min-height: 32px; }
+.pf-body { display: flex; flex-direction: column; gap: var(--s5); min-width: 0; }
+.pf-kpis { gap: var(--s3) var(--s6); }
+.pf-kpis .kpi-main, .pf-kpis .pf-kpi-main { color: var(--accent); }
+.pf-kpis .pf-kpi-main { font-size: var(--text-num); }
+.pf-page .warn-ink { color: var(--warn); }
+
+/* ------------------------------------------------------------ heatmap */
+.pf-heat-wrap { overflow-x: auto; max-width: 100%; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-0); -webkit-overflow-scrolling: touch; }
+.pf-heat-wrap:focus { outline: none; }
+.pf-heat { border-collapse: separate; border-spacing: 2px; font-family: var(--font-mono); }
+.pf-heat th { font: 400 var(--text-2xs)/1.2 var(--font-mono); letter-spacing: var(--track); text-transform: uppercase; color: var(--ink-3); padding: 4px 6px; }
+.pf-heat .pf-group { text-align: left; color: var(--ink-2); border-bottom: 1px solid var(--line-2); padding-bottom: 6px; }
+.pf-heat .pf-fam { text-transform: none; letter-spacing: 0; min-width: 4.25rem; max-width: 6rem; white-space: normal; vertical-align: bottom; text-align: left; }
+.pf-heat th.pf-gstart, .pf-heat td.pf-gstart { box-shadow: -2px 0 0 0 var(--bg-0), -3px 0 0 0 var(--line-2); }
+.pf-heat .pf-pos, .pf-heat .pf-corner { position: sticky; left: 0; z-index: 2; background: var(--bg-0); text-align: left; color: var(--ink-2); }
+.pf-heat .pf-pos { font-size: var(--text-xs); padding-right: var(--s3); }
+
+.pf-cell {
+  position: relative; height: 2.75rem; min-width: 4.25rem; padding: 4px 6px; border-radius: 2px; cursor: pointer;
+  background: var(--bg-2); color: var(--ink); vertical-align: top; transition: outline-color var(--dur) var(--ease);
+  outline: 2px solid transparent; outline-offset: -2px;
+}
+.pf-cell .pf-v { display: block; font-size: var(--text-sm); line-height: 1.1; }
+.pf-cell .pf-n { position: absolute; right: 5px; bottom: 3px; font-size: var(--text-2xs); }
+.pf-cell.is-empty { background: transparent; box-shadow: inset 0 0 0 1px var(--line); cursor: default; }
+.pf-cell.is-empty.pf-gstart { box-shadow: inset 0 0 0 1px var(--line), -2px 0 0 0 var(--bg-0), -3px 0 0 0 var(--line-2); }
+.pf-cell.is-ungraded { background: var(--bg-3); color: var(--ink-3); }
+.pf-cell:not(.is-empty):hover, .pf-cell:focus-visible { outline-color: var(--ink); z-index: 1; box-shadow: none; }
+.pf-cell.is-empty:focus-visible { outline-color: var(--line-2); }
+.pf-cell.is-selected { outline-color: var(--accent); z-index: 1; }
+
+/* the ramp (shared by cells and legend swatches) */
+.pf-b0 { background: color-mix(in srgb, var(--bad) 55%, var(--bg-2)); }
+.pf-b1 { background: color-mix(in srgb, var(--bad) 35%, var(--bg-2)); }
+.pf-b2 { background: color-mix(in srgb, var(--warn) 30%, var(--bg-2)); }
+.pf-b3 { background: color-mix(in srgb, var(--good) 45%, var(--bg-2)); }
+.pf-b4 { background: color-mix(in srgb, var(--good) 85%, var(--bg-2)); }
+.pf-cell.pf-b4 { color: var(--pf-ink-strong); }
+/* thin sample: greyed out (neutral plate + stripes, muted ink); the % stays printed */
+.is-thin { background-image: repeating-linear-gradient(135deg, transparent 0 4px, var(--line-2) 4px 5px); }
+.pf-cell.is-thin, .pf-swatch.is-thin { background-color: var(--bg-3); color: var(--ink-2); }
+.pf-cell.is-thin .pf-v { font-size: var(--text-xs); }
+
+.pf-legend { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s5); font: 400 var(--text-xs) var(--font-mono); color: var(--ink-2); }
+.pf-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); }
+.pf-steps li, .pf-key { display: inline-flex; align-items: center; gap: 6px; }
+.pf-swatch { display: inline-block; width: 18px; height: 12px; border-radius: 2px; box-shadow: inset 0 0 0 1px var(--line); }
+.pf-swatch.is-ungraded { background: var(--bg-3); }
+
+.pf-tip { display: grid; gap: 2px; }
+.pf-tip-v b { font: 400 var(--text-lg)/1 var(--font-mono); color: var(--ink); }
+.pf-tip-name { color: var(--ink-2); font-size: var(--text-sm); }
+
+/* ------------------------------------------------------------ detail */
+.pf-detail-holder { border-top: 1px solid var(--line); padding-top: var(--s4); min-width: 0; }
+.pf-detail { display: flex; flex-direction: column; gap: var(--s4); min-width: 0; }
+.pf-detail-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s4); }
+.pf-detail-title { margin: 0; font-size: var(--text-md); font-weight: 600; }
+.pf-spots { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.pf-spot {
+  display: grid; grid-template-columns: minmax(10rem, 1.6fr) minmax(7rem, 1fr) minmax(5rem, 0.8fr) auto auto;
+  align-items: center; gap: var(--s2) var(--s4); padding: var(--s2) 0; border-top: 1px solid var(--line);
+}
+.pf-spot:last-child { border-bottom: 1px solid var(--line); }
+.pf-spot-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pf-spot-counts { font-size: var(--text-xs); color: var(--ink-2); }
+.pf-close { display: flex; align-items: center; gap: var(--s2); font-size: var(--text-xs); }
+.pf-close b { font-weight: 400; min-width: 2.75rem; text-align: right; }
+.pf-close-bar { flex: 1; height: 6px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.pf-close-bar i { display: block; height: 100%; background: var(--good); border-radius: 2px; }
+.pf-split { display: flex; gap: 2px; height: 6px; min-width: 4rem; }
+.pf-split > span { min-width: 2px; border-radius: 1px; }
+.pf-split .s-best { background: var(--good); } .pf-split .s-mixed { background: var(--warn); } .pf-split .s-blunder { background: var(--bad); }
+.pf-drill { min-height: 36px; padding: 0.35rem 0.8rem; white-space: nowrap; }
+.pf-drill[hidden] { display: none; }
+.pf-recent small { font-family: var(--font-mono); }
+
+/* ------------------------------------------------------------ trend */
+.pf-trend { margin: 0; display: grid; gap: var(--s2); min-width: 0; }
+.pf-plot { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s2); }
+.pf-yaxis { display: flex; flex-direction: column; justify-content: space-between; font: 400 var(--text-2xs)/1 var(--font-mono); color: var(--ink-3); text-align: right; margin: -0.3em 0; }
+.pf-trend-svg { width: 100%; height: 9rem; display: block; overflow: visible; background: var(--bg-0); border: 1px solid var(--line); border-radius: var(--radius); }
+.pf-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.pf-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.pf-end { stroke-width: 8; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.pf-s-close { stroke: var(--accent); } .pf-s-blunder { stroke: var(--bad); }
+.pf-cross { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.pf-hit { fill: transparent; }
+.pf-key-line { display: inline-block; width: 14px; height: 0; border-top: 2px solid; flex: none; }
+.pf-key-line.pf-s-close { border-color: var(--accent); } .pf-key-line.pf-s-blunder { border-color: var(--bad); }
+.pf-trend-legend b { font-weight: 400; }
+
+/* trainer links (Progress tab, page head) */
+.pf-link { font: 400 var(--text-xs) var(--font-mono); letter-spacing: var(--track); text-transform: uppercase; color: var(--accent); text-decoration: none; }
+.pf-link:hover { text-decoration: underline; }
+
+@media (max-width: 900px) {
+  .pf-spot { grid-template-columns: minmax(0, 1fr) auto; }
+  .pf-spot .pf-close, .pf-spot .pf-split { grid-column: 1 / -1; }
+  .pf-spot .pf-spot-counts { grid-row: 1; grid-column: 2; }
+  .pf-spot .pf-drill { grid-column: 1 / -1; justify-self: start; }
+}
+@media (max-width: 700px) {
+  .pf-filter { flex: 1 1 100%; flex-direction: column; align-items: stretch; }
+  .pf-filter .seg-opt { min-height: 44px; }
+  .pf-cell { min-width: 3.75rem; }
+  .pf-heat .pf-fam { min-width: 3.75rem; }
+  .pf-kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (prefers-reduced-motion: reduce) { .pf-cell { transition: none; } }
+.train-head-tools .pf-link { align-self: center; margin-right: var(--s2); }
+@media (max-width: 700px) { .pf-kpis .kpi b { font-size: var(--text-md); } .pf-kpis .pf-kpi-main { font-size: var(--text-xl); } }

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -25,7 +26,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 PAGES = ("/", "/players", "/players/{pid}", "/review", "/review/{hero}", "/hands",
          "/hands/{hand_id}", "/charts", "/strategy", "/strategy/new", "/strategy/{name}",
-         "/train")  # fmt: skip
+         "/train", "/train/performance")  # fmt: skip
 
 
 def _404(e: Exception) -> HTTPException:
@@ -37,6 +38,7 @@ def create_app(db_path: str | Path | None = None, solves_dir: str | Path | None 
     registry = Registry(Path(solves_dir) if solves_dir else repo_root() / "data" / "solves")
     app = FastAPI(title="pn study UI", docs_url="/api/docs", openapi_url="/api/openapi.json")
     app.state.store, app.state.registry = store, registry
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.include_router(solve_router)  # before the /api/solves/{name} routes below
     app.include_router(ev_router)
     app.include_router(train_router)

@@ -26,8 +26,11 @@ GTOW_DEPTHS = (100, 200)
 GTOW_HERO = {"LJ": "UTG", "HJ": "HJ", "CO": "CO", "BTN": "BTN", "SB": "SB", "BB": "BB"}
 GTOW_OPENER = {**GTOW_HERO, "UTG": "UTG", "UTG1": "UTG", "UTG2": "UTG"}
 # PokerCoaching 9-handed 100bb charts (pure; tools/charts_from_pdf.py): consulted before GTO
-# Wizard. Seats use our 8-max names, so 8-max maps directly and 6-max uses LJ..BB.
+# Wizard. 6-max uses LJ..BB. 8-max UTG/UTG1 read the 9-handed UTG1/UTG2 seats (same players
+# behind), as hero and as the opener/3-bettor in "vs X" keys; LJ..BB map directly. Ingested 7- /
+# 9-handed games (table kind "8max" too) shift by their own count: `players`, default 8.
 PC_FILE = "pokercoaching_100bb.txt"
+PC_EP = ("UTG", "UTG1", "UTG2")  # the 9-handed seats in front of LJ
 
 
 class ChartError(KeyError):
@@ -113,12 +116,22 @@ def _gtow_key(table: str, action: str, pos: str, other: str | None) -> str | Non
     }.get(action)
 
 
-def _pc_key(table: str, action: str, pos: str, other: str | None) -> str | None:
+def _pc_seat(pos: str | None, table: str, players: int | None) -> str | None:
+    """The 9-handed seat with as many players behind (ingest names EP seats from the front)."""
+    if table != "8max" or pos not in PC_EP:
+        return pos
+    i = PC_EP.index(pos) + 9 - (players or 8)
+    return PC_EP[min(max(i, 0), len(PC_EP) - 1)]
+
+
+def _pc_key(table: str, action: str, pos: str, other: str | None,
+            players: int | None = None) -> str | None:  # fmt: skip
     if table not in ("6max", "8max"):
         return None
+    pos = _pc_seat(pos, table, players)
     if action in ("open", "limp"):
         return f"{action} {pos}"
-    vs = normalize_position(other, table) if other else None
+    vs = _pc_seat(normalize_position(other, table) if other else None, table, players)
     if vs is None:
         return None
     return {
@@ -131,14 +144,17 @@ def _pc_key(table: str, action: str, pos: str, other: str | None) -> str | None:
     }.get(action)
 
 
-def pc_key(table: str, action: str, position: str, other: str | None = None) -> str | None:
-    """PokerCoaching chart key for the spot (whether or not the file has it)."""
-    return _pc_key(table, action, normalize_position(position, table), other)
+def pc_key(table: str, action: str, position: str, other: str | None = None, *,
+           players: int | None = None) -> str | None:  # fmt: skip
+    """PokerCoaching chart key for the spot (whether or not the file has it); `players` = the
+    hand's player count (8-max table kind: 7 to 9, default 8)."""
+    return _pc_key(table, action, normalize_position(position, table), other, players)
 
 
-def pc_range(table: str, action: str, position: str, other: str | None = None) -> dict | None:
+def pc_range(table: str, action: str, position: str, other: str | None = None, *,
+             players: int | None = None) -> dict | None:  # fmt: skip
     """PokerCoaching range for the spot, or None when the PokerCoaching file does not cover it."""
-    key = pc_key(table, action, position, other)
+    key = pc_key(table, action, position, other, players=players)
     path = charts_dir() / PC_FILE
     if key is None or not path.exists():
         return None
@@ -161,9 +177,8 @@ def gtow_range(table: str, action: str, position: str, other: str | None = None,
     return None
 
 
-def chart_range(
-    table: str, action: str, position: str, opener: str | None = None, depth_bb: float = 100
-) -> dict:
+def chart_range(table: str, action: str, position: str, opener: str | None = None,
+                depth_bb: float = 100, *, players: int | None = None) -> dict:  # fmt: skip
     """Range (combo -> weight) for one chart spot. PokerCoaching 100bb charts first (6-max/
     8-max, any depth), then GTO Wizard files (depth nearest of 100/200bb, then 100bb), then the
     hand-written charts.
@@ -171,9 +186,9 @@ def chart_range(
     action: open | call | 3bet (vs `opener`) | 4bet / call_3bet (opener `position` facing a
     3bet; `opener` = the 3-bettor if known) | 5bet / call_4bet (3bettor facing a 4bet from
     `opener`). PokerCoaching only: limp (SB) | 3bet_limp_vs_raise / call_limp_vs_raise (SB
-    limped, `opener` = BB raised).
+    limped, `opener` = BB raised). `players`: as pc_key.
     """
-    pc = pc_range(table, action, position, opener)
+    pc = pc_range(table, action, position, opener, players=players)
     if pc is not None:
         return pc
     gtow = gtow_range(table, action, position, opener, depth_bb)
