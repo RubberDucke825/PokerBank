@@ -271,8 +271,8 @@ def _libs(lib: list[str] | None, table: int, depth: int) -> list[tuple[int, int]
 @library_app.command("fill")
 def library_fill(
     flops: Annotated[str | None, typer.Option(
-        help="texture-stratified canonical flops per matchup, or `all` (1,755, heaviest first); "
-             "default 50")] = None,
+        help="texture-stratified canonical flops per matchup, or `all` (1,755, heaviest first; "
+             "the index marks those matchups full); default 50")] = None,
     subset: Annotated[int | None, typer.Option(
         help="the weighted N-flop subset (texture x high card; Plan 16: 184) instead of --flops; "
              "recorded on each matchup entry")] = None,
@@ -379,6 +379,7 @@ def library_fill(
                     console.print(f"--- pass: accuracy {acc:g}% pot")
                 results += lf.fill(items, cache, flib.FlopIndex(root), backend=backend, accuracy=acc,
                                    cached_only=cached_only, subset=subset, depth_accuracy=per_depth,
+                                   full=flops == "all",
                                    on_result=lambda r: r.status in ("missing", "aliased") or console.print(
                                        f"{r.status:7} {r.flop} {r.label} {r.detail}"))  # fmt: skip
     except RuntimeError as e:
@@ -422,8 +423,7 @@ def _dry_run(items, notes: list[str], libs: list[tuple[int, int]], shard: str | 
     tag = f" (shard {shard})" if shard is not None else ""
     if accuracy or per_depth:
         index = flib.FlopIndex(cache_dir())
-        left = sum(1 for it in items if (a := index.accuracy(it.matchup.mid, it.flop.flop)) is None
-                   or (target(it.matchup.depth) is not None and a > target(it.matchup.depth)))  # fmt: skip
+        left = sum(1 for it in items if lf.indexed(index, it.matchup, it.flop.flop, target(it.matchup.depth)) is None)
         tag += f", {left} remaining" + (f" at {finest:g}% pot" if finest is not None and not per_depth else "")
     console.print(f"{len(items)} solves planned{tag}")
 

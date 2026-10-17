@@ -5,17 +5,18 @@ from __future__ import annotations
 
 import json
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pn import ranges
 from pn.adapter.state import Line
+from pn.solve import docstore
 from pn.solve.build import DEFAULT_SIZES
 from pn.solve.request import LINES, POSTFLOP_SEAT_ORDER, SOLVE_PRESETS, TABLE_SEATS, new_request
 from pn.solve.sources import seat_range
-from pn.web.solves import CACHE_PREFIX, INDEX_FILE, Registry, SolveNotFound
+from pn.web.solves import CACHE_PREFIX, Registry, SolveNotFound, board_of
 
 META_HEAD_BYTES = 8192  # the document's `meta` object is read from the start of the file
 # Pot type from the pot per player in big blinds (pn.train.leaks thresholds)
@@ -32,9 +33,9 @@ def pot_type(pot: int, bb: int, n_players: int) -> str:
 def read_meta(path: Path) -> dict:
     """`meta` of a strategy document from its first bytes ({} when it is not at the start)."""
     try:
-        with path.open("rb") as f:
+        with docstore.open_binary(path) as f:
             head = f.read(META_HEAD_BYTES).decode("utf-8", "ignore")
-    except OSError:
+    except (OSError, EOFError):
         return {}
     at = head.find('"meta"')
     if at < 0:
@@ -76,12 +77,9 @@ def library_rows(registry: Registry) -> list[dict]:
         if e.get("key") and (e["key"] not in by_key or e.get("parent") is None):
             by_key[e["key"]] = (n, e)
     rows = []
-    for path in root.glob("*.json"):
-        if path.name == INDEX_FILE:
-            continue
-        key = path.stem
+    for key, path in docstore.doc_files(root).items():
         try:
-            spot = tomllib.loads(path.with_suffix(".toml").read_text())
+            spot = tomllib.loads((root / f"{key}.toml").read_text())
             st = path.stat()
         except (OSError, tomllib.TOMLDecodeError):
             continue
@@ -125,14 +123,16 @@ def _first_reach(nodes: Mapping[str, Any], root: str, player: int) -> list[float
     return None
 
 
-def node_ranges(doc: Mapping[str, Any], tokens: list[str]) -> dict:
-    """Every player's combo weights reaching the node at `tokens` (range weight x own strategy
-    product along the line; dealt cards zero the combos they block). A node's own
-    reach_by_player / reach win when present. SolveNotFound for a path that does not exist."""
+def _walk(doc: Mapping[str, Any], tokens: list[str],
+          visit: Callable[[Mapping[str, Any], int, list, list[str]], None] | None = None,
+          ) -> tuple[str, list[list[float] | None], list[str]]:  # fmt: skip
+    """(node id, every player's reach, chance cards dealt) at `tokens`; `visit(node, k, reach,
+    dealt)` sees each action node on the way before action `k`'s strategy applies."""
     nodes, root = doc["nodes"], doc["root"]
     combos = doc["combos"]
     n = len(doc.get("players") or []) or 2
     reach = [_first_reach(nodes, root, p) for p in range(n)]
+    dealt: list[str] = []
     nid = root
     for i, tok in enumerate(tokens):
         node = nodes[nid]
@@ -141,6 +141,8 @@ def node_ranges(doc: Mapping[str, Any], tokens: list[str]) -> dict:
             k = next((j for j, a in enumerate(node["actions"]) if a["token"] == tok), None)
             if k is None:
                 raise SolveNotFound(f"path {tokens[: i + 1]} does not exist")
+            if visit is not None:
+                visit(node, k, reach, dealt)
             p = node["player"]
             strat = node.get("strategy")
             if reach[p] is not None and strat is not None:
@@ -149,16 +151,60 @@ def node_ranges(doc: Mapping[str, Any], tokens: list[str]) -> dict:
         elif node.get("type") == "chance" and tok in (node.get("children") or {}):
             reach = [None if r is None else [0.0 if tok in c else w for c, w in zip(combos, r, strict=True)]
                      for r in reach]  # fmt: skip
+            dealt.append(tok)
             nid = node["children"][tok]
         else:
             raise SolveNotFound(f"path {tokens[: i + 1]} does not exist")
-    node = nodes[nid]
-    _adopt(node, reach)
+    _adopt(nodes[nid], reach)
+    return nid, reach, dealt
+
+
+def node_ranges(doc: Mapping[str, Any], tokens: list[str]) -> dict:
+    """Every player's combo weights reaching the node at `tokens` (range weight x own strategy
+    product along the line; dealt cards zero the combos they block). A node's own
+    reach_by_player / reach win when present. SolveNotFound for a path that does not exist."""
+    nid, reach, _ = _walk(doc, tokens)
+    node = doc["nodes"][nid]
+    n = len(reach)
     players = doc.get("players") or [{"position": f"P{p}"} for p in range(n)]
     return {"id": nid, "type": node.get("type"), "player": node.get("player"),
             "players": [{"index": p, "position": players[p].get("position"),
                          "reach": None if reach[p] is None else _round(reach[p])}
                         for p in range(n)]}  # fmt: skip
+
+
+def line_breakdown(doc: Mapping[str, Any], tokens: list[str], parent: dict | None = None) -> dict:
+    """How the actor's range split over its actions at every action node on the line to
+    `tokens` (the final node excluded), per hand class: `reach` entering (the node_ranges walk,
+    board and dealt cards zeroed), `n` live combos and reach-weighted `freq` per action."""
+    combos = doc["combos"]
+    cls = [ranges.combo_class(c) for c in combos]
+    board = board_of(doc)
+    positions = [p.get("position") for p in doc.get("players") or []]
+    steps: list[dict] = []
+
+    def visit(node: Mapping[str, Any], k: int, reach: list, dealt: list[str]) -> None:
+        p, acts = node["player"], node["actions"]
+        dead = {*board, *dealt}
+        r, strat = reach[p], node.get("strategy")
+        out = {c: [0.0, 0, [0.0] * len(acts)] for c in ranges.all_classes()}
+        for i, combo in enumerate(combos):
+            if combo[:2] in dead or combo[2:] in dead:
+                continue
+            row = out[cls[i]]
+            row[1] += 1
+            w = r[i] if r is not None else 0.0
+            row[0] += w
+            if w and strat is not None:
+                row[2] = [f + w * x for f, x in zip(row[2], strat[i], strict=True)]
+        steps.append({"position": positions[p] if p < len(positions) else f"P{p}",
+                      "actions": [a["token"] for a in acts], "taken": acts[k]["token"],
+                      "classes": {c: {"reach": _round([w])[0], "n": m,
+                                      "freq": _round([f / w for f in fs]) if w else [0] * len(fs)}
+                                  for c, (w, m, fs) in out.items()}})  # fmt: skip
+
+    dealt = _walk(doc, tokens, visit)[2]
+    return {"board": [*board, *dealt], "parent": parent, "steps": steps}
 
 
 def _adopt(node: Mapping[str, Any], reach: list[list[float] | None]) -> None:

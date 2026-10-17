@@ -223,10 +223,12 @@ class FlopIndex:
         return dict(entry.get("boards", {}))
 
     def record(self, m: Matchup, board: str, key: str, weight: int,
-               accuracy: float | None = None, subset: int | None = None) -> None:  # fmt: skip
+               accuracy: float | None = None, subset: int | None = None,
+               full: bool = False) -> None:  # fmt: skip
         """Record a solved board. A new entry carries the table kind (labels do not: 6-max and
         8-max lines share them); `subset` (Plan 16: the flop subset size the fill plans) is
-        written on the entry when given."""
+        written on the entry when given; `full` (Plan 17: a fill over all 1,755 flops) drops it
+        and writes `flops: "all"`, which a later subset pass never downgrades."""
         data = self._batch if self._batch is not None else json.loads(json.dumps(self.load()))
         if "alias_of" in data["matchups"].get(m.mid, {}):
             raise ValueError(f"{m.label} is an alias: its boards are the target's")
@@ -234,7 +236,10 @@ class FlopIndex:
                                                     "positions": list(m.positions),
                                                     "depth": m.depth, "table": m.table_kind,
                                                     "boards": {}})  # fmt: skip
-        if subset is not None:
+        if full:
+            entry.pop("subset", None)
+            entry["flops"] = "all"
+        elif subset is not None and entry.get("flops") != "all":
             entry["subset"] = subset
         entry["boards"][board] = {"key": key, "weight": weight}
         if accuracy is not None:

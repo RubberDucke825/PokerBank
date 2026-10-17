@@ -2,6 +2,7 @@
 
 import typer
 
+from pn.cli.cache_cmds import app as cache_app
 from pn.cli.ev_cmds import app as ev_app
 from pn.cli.ingest_cmds import app as ingest_app
 from pn.cli.positional_cmds import app as positional_app
@@ -18,6 +19,7 @@ app.add_typer(positional_app)
 app.add_typer(web_app)
 app.add_typer(ev_app)
 app.add_typer(train_app)
+app.add_typer(cache_app)
 
 if __name__ == "__main__":
     app()

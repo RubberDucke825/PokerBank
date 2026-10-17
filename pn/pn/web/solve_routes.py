@@ -195,6 +195,19 @@ def solves_ranges(name: str, request: Request, path: str = "", node: str = "") -
         raise HTTPException(404, str(e)) from e
 
 
+@router.get("/api/solves/{name}/line_breakdown")
+def solves_line_breakdown(name: str, request: Request, node: str = "", path: str = "") -> Response:
+    """Per action node on the line to node id `node` (or `path`): the actor's per-class range
+    and its split over the actions (study.line_breakdown), with the registry's parent street."""
+    reg = _solve_ctx(request)[0]
+    try:
+        doc = reg.get(name)
+        parent = reg.info(name).get("parent")
+        return _raw(study.line_breakdown(doc, _tokens(doc, path, node), parent))
+    except SolveNotFound as e:
+        raise HTTPException(404, str(e)) from e
+
+
 def _tokens(doc: dict, path: str, node: str) -> list[str]:
     """Path tokens from `path`, or walked up from node id `node` (SolveNotFound if unknown)."""
     if not node:

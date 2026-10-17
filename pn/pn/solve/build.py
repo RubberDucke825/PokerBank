@@ -76,6 +76,8 @@ def build(req: SpotRequest, profiles: ProfileSource | None = None) -> BuiltSpot:
         raise SpotError(f"need 2..8 seats, got {len(seats)}")
     depth_bb = _depth_bb(req)
     three_bettor = next((s.position for s in seats if s.line == "3bet"), None)
+    limpers = [s.position for s in seats if s.line == "limp"]
+    limper = limpers[0] if len(limpers) == 1 else None
     players: list[dict[str, Any]] = []
     results: list[SeatResult] = []
     for seat in seats:
@@ -85,7 +87,8 @@ def build(req: SpotRequest, profiles: ProfileSource | None = None) -> BuiltSpot:
         else:
             line = Line(seat.line, seat.vs) if seat.line else None
             rng, origin = seat_range(position=seat.position, line=line, table=req.table,
-                                     depth_bb=depth_bb, three_bettor=three_bettor)  # fmt: skip
+                                     depth_bb=depth_bb, three_bettor=three_bettor,
+                                     limper=limper)  # fmt: skip
         if seat.key in req.overrides:
             rng, origin = ranges.parse(req.overrides[seat.key]), "override"
         dead = [*req.board, *([] if seat.hero else req.hero_cards)]

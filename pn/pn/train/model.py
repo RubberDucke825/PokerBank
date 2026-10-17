@@ -127,6 +127,7 @@ class SolveInfo:
     note: str | None = None
     name: str | None = None  # Registry name of the street's solve (grid_ref)
     detail: str | None = None  # human text for the note (no_library_solve: why there is no board)
+    parent: dict | None = None  # {name, node} of the previous street's solve (while solving)
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,7 @@ PROBES = ("Ks7d2c", "AhQh5h", "7h7c2s")  # any boards: a key hashes ranges, stac
 LIBS = ((6, 100), (8, 100), (6, 200), (8, 200))
 SKIPPED_POTS = ("limped",)  # never solved outside 6-max 100bb (budget decision 2026-10-15)
 SB, BB = 50, 100  # cents, as pn.train.session deals
+N_FLOPS = 1755  # canonical flops (library_fill.all_flops): a matchup with all of them is full
 
 
 @dataclass(frozen=True)
@@ -109,11 +110,22 @@ def run(index: FlopIndex, table: int, depth: int, *, sample: int = 25, dry_run: 
     return rows
 
 
+def _fill_state(entry: Mapping[str, Any], boards: int) -> str:
+    """full (every canonical flop indexed, or a pre-Plan-16 entry: the wide fill recorded no
+    subset), extending (a `--flops all` fill has started: `flops: "all"`, boards missing) or
+    subset (filled from the `subset`-flop plan)."""
+    if boards >= N_FLOPS:
+        return "full"
+    if entry.get("flops") == "all":
+        return "extending"
+    return "subset" if entry.get("subset") is not None else "full"
+
+
 def coverage(index: FlopIndex, table: int, depth: int,
              freqs: Mapping | None = None) -> dict[str, Any]:  # fmt: skip
-    """{table, depth, matchups, solved, subset, full, aliased, aliased_with_boards, missing,
-    skipped, rows}: a matchup is solved (boards of its own; `subset` when its entry records the
-    flop subset it was filled from, else full), aliased, or missing; a limped pot outside 6-max
+    """{table, depth, matchups, solved, subset, extending, full, aliased, aliased_with_boards,
+    missing, skipped, rows}: a matchup is solved (boards of its own; its `fill` is subset,
+    extending or full: _fill_state), aliased, or missing; a limped pot outside 6-max
     100bb that is missing, or aliased to a 6-max limped line of another depth without boards, is
     `skipped` (intentionally never solved)."""
     entries = index.load()["matchups"]
@@ -129,13 +141,15 @@ def coverage(index: FlopIndex, table: int, depth: int,
             state == "missing" or (state == "aliased" and not boards and depth != 100)
         )
         rows.append({"mid": m.mid, "label": m.label, "pot": m.pot, "state": state,
-                     "boards": boards, "subset": e.get("subset"), "skipped": skipped})  # fmt: skip
+                     "boards": boards, "subset": e.get("subset"), "skipped": skipped,
+                     "fill": _fill_state(e, boards) if state == "solved" else None})  # fmt: skip
     solved = [r for r in rows if r["state"] == "solved"]
     aliased = [r for r in rows if r["state"] == "aliased"]
     missing = [r for r in rows if r["state"] == "missing"]
     return {"table": table, "depth": depth, "matchups": len(rows), "solved": len(solved),
-            "subset": sum(r["subset"] is not None for r in solved),
-            "full": sum(r["subset"] is None for r in solved), "aliased": len(aliased),
+            "subset": sum(r["fill"] == "subset" for r in solved),
+            "extending": sum(r["fill"] == "extending" for r in solved),
+            "full": sum(r["fill"] == "full" for r in solved), "aliased": len(aliased),
             "aliased_with_boards": sum(r["boards"] > 0 for r in aliased),
             "missing": len(missing), "skipped": sum(r["skipped"] for r in rows),
             "rows": rows}  # fmt: skip
@@ -143,6 +157,6 @@ def coverage(index: FlopIndex, table: int, depth: int,
 
 def summary_line(c: Mapping[str, Any]) -> str:
     return (f"{c['table']}max/{c['depth']}bb: {c['matchups']} matchups, {c['solved']} solved "
-            f"({c['subset']} subset, {c['full']} full), {c['aliased']} aliased "
+            f"({c['subset']} subset, {c['extending']} extending, {c['full']} full), {c['aliased']} aliased "
             f"({c['aliased_with_boards']} with boards), {c['missing']} missing; "
             f"{c['skipped']} limped skipped on purpose")  # fmt: skip

@@ -363,12 +363,55 @@ def villain_action(st: State, i: int, combo: str, *, rng: random.Random, table: 
                    depth: int,
                    freqs: Mapping | None = None) -> tuple[str, int | None, str]:  # fmt: skip
     """(kind, to, origin) for villain seat `i`: the PokerCoaching / GTO Wizard / chart action
-    (Plan 7: no profile blend, every villain plays the chart / GTO strategy)."""
+    (Plan 7: no profile blend, every villain plays the chart / GTO strategy), kept heads-up
+    by heads_up_dist."""
     sit = situation(st, i)
     gto = gto_decision(st, i, combo, table, depth, freqs)
-    code = sample(gto.dist, rng)
-    kind, to = code_action(st, i, code, raise_to(st, i, sit, gto.spot))
+    size = raise_to(st, i, sit, gto.spot)
+    dist = sb_limp_as_raise(gto.dist, st, i, sit, combo, table)
+    code = sample(heads_up_dist(st, i, dist, size), rng)
+    kind, to = code_action(st, i, code, size)
     return kind, to, gto.origin
+
+
+def sb_limp_as_raise(dist: Mapping[str, float], st: State, i: int, sit: Situation, combo: str,
+                     table: str) -> Mapping[str, float]:  # fmt: skip
+    """Bots never limp: the SB's chart limps become an open raise for the hands PokerCoaching
+    continues with after a BB raise (value re-raises and calls), a fold for the rest."""
+    limp = dist.get("C", 0.0)
+    if not limp or sit.kind != "rfi" or st.positions[i] != "SB":
+        return dist
+    c = ranges.canonical_combo(combo)
+    keep = max(float((charts.pc_range(table, action, "SB", "BB") or {}).get(c, 0.0))
+               for action in ("3bet_value_limp_vs_raise", "call_limp_vs_raise"))  # fmt: skip
+    out = {k: v for k, v in dist.items() if k != "C"}
+    out["R"] = out.get("R", 0.0) + limp * keep
+    out["F"] = out.get("F", 0.0) + limp * (1 - keep)
+    return out
+
+
+def heads_up_dist(st: State, i: int, dist: Mapping[str, float], size_to: int) -> dict[str, float]:
+    """`dist` without the actions that would make a limped or 3+ player pot (bots only; the
+    trainer grades heads-up pots, user 2026-10-16): no limp (the SB included), a call only
+    against a lone raiser, a raise only with at most one other player in. Dropped weight goes
+    to the kept actions in proportion, all of it to fold (check when free) when none is kept."""
+    seats = {a.seat for a in st.history if a.kind in ("call", "raise")}
+    others = sum(1 for j in seats if j != i and not st.folded[j])
+    raised = any(a.kind == "raise" for a in st.history)
+
+    def ok(code: str) -> bool:
+        kind, _ = code_action(st, i, code, size_to)
+        if kind == "call":
+            return raised and others == 1
+        if kind in ("raise", "allin"):
+            return others <= 1
+        return True
+
+    kept = {c: f for c, f in dist.items() if f > 0 and ok(c)}
+    tot = sum(kept.values())
+    if not tot:
+        return {"F": 1.0}  # code_action turns F into a check when nothing is owed
+    return {c: f / tot for c, f in kept.items()}
 
 
 def hero_grade(st: State, i: int, combo: str, chosen: str, table: str, depth: int,

@@ -34,6 +34,7 @@ from typing import Any
 from pn import ranges
 from pn.adapter.state import STREETS
 from pn.profile import gtowizard
+from pn.solve import docstore
 from pn.solve.backend import MULTIWAY_UNSOLVABLE
 from pn.solve.lazydoc import LazyDoc
 from pn.solve.library import library_path
@@ -441,18 +442,19 @@ class DocStats:
 
 
 def doc_stats(toml_path: Path) -> tuple[DocStats, ...] | None:
-    """DocStats of one heads-up SolveCache entry (<key>.toml + <key>.json), one per seat (both
+    """DocStats of one heads-up SolveCache entry (<key>.toml + <key>.json[.gz]), one per seat (both
     players' situations count, so a library flop document solved with the aggressor flagged
     also prices the caller's side); None for preflop spots, 3+ players, or unreadable files.
     The pot type of a flop spot comes from the pot per player in big blinds (<= 1.5 limped,
     <= 4.5 srp, <= 13 3bp, else 4bp+)."""
-    js = toml_path.with_suffix(".json")
     try:
         game = tomllib.loads(toml_path.read_text())["game"]
-        if game.get("street") not in POSTFLOP or not js.exists():
+        if game.get("street") not in POSTFLOP:
             return None
-        doc = json.loads(js.read_text())
-    except (OSError, ValueError, KeyError):
+        doc = docstore.read(toml_path.parent, toml_path.stem)  # retries a `pn cache compress` swap
+    except (OSError, ValueError, KeyError, EOFError):
+        return None
+    if doc is None:
         return None
     positions = [p["position"] for p in doc.get("players", [])]
     if len(positions) != 2:  # heads-up street solves only
@@ -619,7 +621,7 @@ class Leaks:
         if p in self._docs:
             return self._docs[p]
         ds = doc_stats(p)
-        return ds if ds is not None or p.with_suffix(".json").exists() else _UNREAD
+        return ds if ds is not None or docstore.doc_path(p.parent, p.stem) else _UNREAD
 
     def ready(self) -> bool:
         """True once a scan has finished (starting one in the background if none has)."""

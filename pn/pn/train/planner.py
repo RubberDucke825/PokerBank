@@ -168,7 +168,7 @@ class DrillPlanner:
         """(target spot, line) of the pinned formation: its highest-reach line, aimed at hero's
         first flop decision; None when not reached or without a solved board."""
         line = self.leaks.formation_line(cfg.table, cfg.depth, cfg.drill_formation)
-        if line is None or not self._boards(cfg, line, None):
+        if line is None or not heads_up_line(line) or not self._boards(cfg, line, None):
             return None
         positions, pot = imp.parse_formation(cfg.drill_formation)
         side = "ip" if spots.is_ip(line.hero, positions) else "oop"
@@ -216,9 +216,10 @@ class DrillPlanner:
         if self.leaks is None:
             return None
         if not spot.startswith("post|"):
-            return self.leaks.line(cfg.table, cfg.depth, spot)
+            line = self.leaks.line(cfg.table, cfg.depth, spot)
+            return line if line is not None and heads_up_line(line) else None
         for line in self.leaks.lines(cfg.table, cfg.depth, spot):
-            if self._boards(cfg, line, None):
+            if heads_up_line(line) and self._boards(cfg, line, None):
                 return line
         return None
 
@@ -250,3 +251,19 @@ class DrillPlanner:
                 return pick
             log.warning("no dealable %s flop for %s: dealing any solved flop", tex, matchup.label)
         return flib.pick_board(self.flops, self.cache, matchup.mid, h.deck, rng)
+
+
+def heads_up_line(line: Line) -> bool:
+    """A drill line the trainer's bots could play (user 2026-10-16): no limp, and no call or
+    raise once two other players are in (no cold call into 3+, no squeeze)."""
+    vol: set[str] = set()
+    raised = False
+    for step in line.steps:
+        if step.kind in ("call", "raise", "allin"):
+            if step.kind == "call" and not raised:
+                return False
+            if len(vol - {step.position}) >= 2:
+                return False
+            vol.add(step.position)
+            raised = raised or step.kind != "call"
+    return True

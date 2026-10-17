@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pn.profile.paths import repo_root
-from pn.solve import Seat, SolveCache, SpotRequest, build_spot, library, spot_key
+from pn.solve import Seat, SolveCache, SpotRequest, build_spot, docstore, library, spot_key
 from pn.solve.cache import is_stale
 from pn.solve.lazydoc import LazyDoc, LazyDocError
 from pn.solve.request import (
@@ -249,12 +249,15 @@ class Registry:
             return doc
         if info.get("seen_mtime") == mtime:
             return doc
-        info["seen_mtime"] = mtime
         try:
-            new = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError) as e:
+            new = docstore.read(path.parent, key)  # retries a `pn cache compress` swap
+        except (OSError, ValueError, EOFError) as e:
             log.warning("re-reading %s for %s failed: %s", path, name, e)
+            info["seen_mtime"] = mtime  # unreadable as it stands: retry when it changes
             return doc
+        if new is None:
+            return doc  # gone meanwhile: not seen, so the next request looks again
+        info["seen_mtime"] = mtime
         if stale_doc(new):
             return doc
         new = with_board(new, tuple((doc.get("meta") or {}).get("board") or ()))
@@ -391,8 +394,9 @@ class Registry:
                     store.pop(n, None)  # type: ignore[attr-defined]
             if self._library is not None and self._library[0] in names:
                 self._library = None
-            removed: list[str] = []
-            paths = [self._cache_store().path(key), self._cache_store().root / f"{key}.toml"] if key else []
+            root = self._cache_store().root
+            removed = [str(p) for p in docstore.remove(root, key)] if key else []
+            paths = [root / f"{key}.toml"] if key else []
             if file is not None and file.parent == self.solves_dir:
                 paths.append(file)
             for p in paths:
@@ -418,8 +422,9 @@ class Registry:
         """Full SolveCache key for a `cache-<prefix>` name (caller holds the lock)."""
         if not re.fullmatch(r"[0-9a-f]{8,64}", prefix):
             return None
-        hits = sorted(self._cache_store().root.glob(f"{prefix}*.json"))
-        return hits[0].stem if len(hits) == 1 else None
+        root = self._cache_store().root
+        hits = {k for p in root.glob(f"{prefix}*.json*") if (k := docstore.key_of(p.name))}
+        return hits.pop() if len(hits) == 1 else None
 
     # ------------------------------------------------------------ views
     def meta(self, name: str) -> dict:

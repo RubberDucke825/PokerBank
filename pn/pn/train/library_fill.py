@@ -11,7 +11,9 @@ Resumable: boards already cached are recorded and skipped. One solve at a time t
 SolveCache lock; the run is preempted (and retried) whenever a trainer solve is waiting.
 Accuracy passes (Plan 10): `fill(..., accuracy=x)` solves to x % of pot under its own cache key
 and records it; a board the index already holds at a finer or equal accuracy is left alone
-("finer"), so passes run coarse to fine (1 -> 0.5 -> 0.3) without ever downgrading a board.
+("finer"), so passes run coarse to fine (1 -> 0.5 -> 0.3) without ever downgrading a board,
+unless its recorded key is no longer the board's key (`indexed`: the spot changed): then it is
+solved again (or, --cached-only, its new document recorded) and the entry replaced.
 """
 
 from __future__ import annotations
@@ -461,28 +463,30 @@ def fill(items: Sequence[FillItem], cache: SolveCache, index: FlopIndex, *,
          wait: Callable[[], None] | None = None,
          on_result: Callable[[FillResult], None] | None = None,
          cached_only: bool = False, subset: int | None = None,
-         depth_accuracy: Mapping[int, float] | None = None) -> list[FillResult]:  # fmt: skip
+         depth_accuracy: Mapping[int, float] | None = None, full: bool = False) -> list[FillResult]:  # fmt: skip
     """Solve the items in order to `accuracy` % of pot (None = the preset's). A Preempted solve
     waits for the priority solves (`wait`, default: until none is waiting) and is retried; other
-    failures are reported and skipped; a board already indexed at a finer or equal accuracy is
-    reported "finer" and left as it is. `cached_only` records the documents already in the cache
-    (pulled from other machines) and reports the rest "missing" without solving, writing the
-    index once at the end. An alias entry's matchup (pn.train.library_alias) is reported
-    "aliased" and never solved or recorded. `subset` is recorded on each matchup entry the run writes.
+    failures are reported and skipped; a board already indexed at a finer or equal accuracy under
+    its current key (`indexed`) is reported "finer" and left as it is. `cached_only` records the
+    documents already in the cache (pulled from other machines) and reports the rest "missing"
+    without solving, writing the index once at the end. An alias entry's matchup
+    (pn.train.library_alias) is reported "aliased" and never solved or recorded. `subset` is recorded on each matchup entry the run writes;
+    `full` (a `--flops all` run, Plan 17) marks the entries it records a board on `flops: "all"`
+    instead (FlopIndex.record; a weight reset alone does not).
     `depth_accuracy` ({depth bb: % of pot}) replaces `accuracy` for the matchups of that depth
     (Plan 16: 200bb solves to 2% pot, 100bb to 1%)."""
     da = dict(depth_accuracy or {})
     if cached_only:
         with index.batch():
-            return _fill(items, cache, index, backend, accuracy, wait, on_result, True, subset, da)
-    return _fill(items, cache, index, backend, accuracy, wait, on_result, False, subset, da)
+            return _fill(items, cache, index, backend, accuracy, wait, on_result, True, subset, da, full)
+    return _fill(items, cache, index, backend, accuracy, wait, on_result, False, subset, da, full)
 
 
 def _fill(items: Sequence[FillItem], cache: SolveCache, index: FlopIndex, backend: str,
           accuracy: float | None, wait: Callable[[], None] | None,
           on_result: Callable[[FillResult], None] | None, cached_only: bool,
           subset: int | None = None,
-          depth_accuracy: Mapping[int, float] | None = None) -> list[FillResult]:  # fmt: skip
+          depth_accuracy: Mapping[int, float] | None = None, full: bool = False) -> list[FillResult]:  # fmt: skip
     wait = wait or (lambda: _wait_idle(cache.root))
     out: list[FillResult] = []
     for it in items:
@@ -494,11 +498,12 @@ def _fill(items: Sequence[FillItem], cache: SolveCache, index: FlopIndex, backen
             continue
         board = tuple(fl.flop_cards(it.flop.flop))
         target = (depth_accuracy or {}).get(it.matchup.depth, accuracy)
-        have = index.accuracy(it.matchup.mid, it.flop.flop)
-        if target is not None and have is not None and have <= target:
+        have = indexed(index, it.matchup, it.flop.flop, target)
+        if have is not None:
             if cached_only:  # a stratified fill recorded the chunk's weight; the wide plan carries the raw one
                 entry = index.boards(it.matchup.mid).get(it.flop.flop) or {}
                 if entry.get("weight") != it.flop.weight and entry.get("key"):
+                    # a weight reset is not an extension: never marks the entry full (review)
                     index.record(it.matchup, it.flop.flop, entry["key"], it.flop.weight, have, subset)
             res = FillResult(it.matchup.label, it.flop.flop, "", "finer", f"at {have:g}% pot")
             out.append(res)
@@ -510,7 +515,7 @@ def _fill(items: Sequence[FillItem], cache: SolveCache, index: FlopIndex, backen
         cached = cache.get(key)
         res = None
         if cached is not None and (cached.get("meta") or {}).get("backend") == backend:
-            index.record(it.matchup, it.flop.flop, key, it.flop.weight, acc, subset)
+            index.record(it.matchup, it.flop.flop, key, it.flop.weight, acc, subset, full)
             res = FillResult(it.matchup.label, it.flop.flop, key, "cached")
         elif cached_only:
             res = FillResult(it.matchup.label, it.flop.flop, key, "missing")
@@ -527,12 +532,23 @@ def _fill(items: Sequence[FillItem], cache: SolveCache, index: FlopIndex, backen
             if ran != backend:
                 res = FillResult(it.matchup.label, it.flop.flop, key, "failed", f"backend {ran}")
             else:
-                index.record(it.matchup, it.flop.flop, key, it.flop.weight, acc, subset)
+                index.record(it.matchup, it.flop.flop, key, it.flop.weight, acc, subset, full)
                 res = FillResult(it.matchup.label, it.flop.flop, key, "solved")
         out.append(res)
         if on_result:
             on_result(res)
     return out
+
+
+def indexed(index: FlopIndex, m: Matchup, flop: str, target: float | None) -> float | None:
+    """The board's indexed accuracy when it is at or finer than `target` and its recorded key is
+    still the board's key at that accuracy, else None. A stale key (the spot changed, e.g. new
+    seat ranges) is re-solved like a missing board; its entry stays until the new key is recorded."""
+    entry = index.boards(m.mid).get(flop) or {}
+    have = None if entry.get("accuracy") is None else float(entry["accuracy"])
+    if target is None or have is None or have > target:
+        return None
+    return have if entry.get("key") == flop_spot(m, tuple(fl.flop_cards(flop)), have)[2] else None
 
 
 def _wait_idle(root: Path) -> None:

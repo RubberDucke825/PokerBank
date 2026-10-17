@@ -100,8 +100,8 @@ def _grid_ref(grade: Mapping[str, Any], h: Hand) -> dict[str, str] | None:
 
 class Trainer(DrillPlanner):
     """In-memory sessions. Street solves go through `cache` (trainer preset, hard-timeout
-    runner); `register(doc, req) -> name` publishes them for grid_ref; `background=False`
-    solves inline (tests)."""
+    runner); `register(doc, req, parent) -> name` publishes them for grid_ref (`parent` = {name, node} of
+    the previous street's solve, or None); `background=False` solves inline (tests)."""
 
     def __init__(self, cache: SolveCache | None = None, profiles: ProfileSource | None = None,
                  names: Callable[[], Mapping[str, str]] | None = None,
@@ -390,6 +390,8 @@ class Trainer(DrillPlanner):
                 s.hand = replace(s.hand, solve=SolveInfo(note=OFF_TREE))
                 return
             req = _lift(h, cards)
+            # node ids are the document's own (no suit permutation)
+            parent = {"name": h.solve.name, "node": h.tree.node} if h.solve.name else None
             spot = post.ensure_combos(build_spot(req, self.profiles),
                                       {p.position: p.combo for i, p in enumerate(h.players)
                                        if not new.folded[i]})  # fmt: skip
@@ -400,7 +402,7 @@ class Trainer(DrillPlanner):
         # terminals after the street). The cache key ignores the backend.
         spot, backend = apply_preset(spot, TRAINER_PRESET)
         s.pending_req = req
-        s.hand = replace(s.hand, solve=SolveInfo("solving"))
+        s.hand = replace(s.hand, solve=SolveInfo("solving", parent=parent))
         if self.background:
             s.future = self._pool.submit(self.cache.solve, spot, backend, priority=True)
         else:
@@ -436,7 +438,7 @@ class Trainer(DrillPlanner):
             if post.tree_actions(tree, s.hand.state) is None:
                 raise ValueError("solved root does not match the hand")
             canon = sm.permute_request(req, sm.inverse(perm))  # registered on the document's board
-            name = self.register(doc, canon) if self.register else None
+            name = self.register(doc, canon, s.hand.solve.parent) if self.register else None
             s.hand = replace(s.hand, tree=tree, solve=SolveInfo("ready", backend, name=name))
         except SOLVE_ERRORS as e:
             s.hand = replace(s.hand, tree=None,

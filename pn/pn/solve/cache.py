@@ -1,16 +1,16 @@
-"""Solve cache: data/solves/cache/<spot_key>.json (+ .toml), a 4-document in-memory LRU, and a
-process-wide lock so only one solver subprocess runs at a time (8 GB machine), extended across
-processes by pn.solve.lock (an flock under the cache root). Waiting `priority` solves (the
-trainer's) go before waiting ordinary ones (library / review jobs) in this and other processes.
-A cached 2-player postflop document solved by any backend other than `texas` (mwsolver, hu,
-dcfr) is stale once TexasSolver is available (Plan 7): it is re-solved under the same key.
-`progress` / `should_stop` are forwarded to the runner (pn.solve.backend.run_backend)."""
+"""Solve cache: data/solves/cache/<spot_key>.json.gz or plain .json (pn.solve.docstore) + .toml,
+a 4-document in-memory LRU, and a process-wide lock so only one solver subprocess runs at a
+time (8 GB machine), extended across processes by pn.solve.lock (an flock under the cache root).
+Waiting `priority` solves (the trainer's) go before waiting ordinary ones (library / review
+jobs) in this and other processes. A cached 2-player postflop document solved by any backend
+other than `texas` (mwsolver, hu, dcfr) is stale once TexasSolver is available (Plan 7): it is
+re-solved under the same key. `progress` / `should_stop` are forwarded to the runner
+(pn.solve.backend.run_backend)."""
 
 from __future__ import annotations
 
 import hashlib
 import inspect
-import json
 import logging
 import os
 import threading
@@ -23,6 +23,7 @@ from typing import Any
 from pn import ranges
 from pn.adapter.validate import to_toml
 from pn.profile.paths import repo_root
+from pn.solve import docstore
 from pn.solve.backend import run_backend, texas_available
 from pn.solve.lock import file_lock
 
@@ -132,7 +133,8 @@ class SolveCache:
         self._mem_lock = threading.Lock()
 
     def path(self, key: str) -> Path:
-        return self.root / f"{key}.json"
+        """The document file of `key`: the existing one (gz first), else where a solve writes it."""
+        return docstore.doc_path(self.root, key) or docstore.write_path(self.root, key)
 
     def _remember(self, key: str, doc: dict) -> None:
         with self._mem_lock:
@@ -146,10 +148,9 @@ class SolveCache:
             if key in self._mem:
                 self._mem.move_to_end(key)
                 return self._mem[key]
-        path = self.path(key)
-        if not path.exists():
+        doc = docstore.read(self.root, key)  # survives a compress swap; torn gz -> plain copy
+        if doc is None:
             return None
-        doc = json.loads(path.read_text())
         self._remember(key, doc)
         return doc
 
@@ -178,6 +179,6 @@ class SolveCache:
             doc, ran = self.runner(spot, backend, **hooks)
             doc.setdefault("meta", {}).setdefault("backend", ran)
             _write(self.root / f"{key}.toml", to_toml(spot, header=f"pn solve cache {key}"))
-            _write(self.path(key), json.dumps(doc))
+            docstore.dump(self.root, key, doc)
         self._remember(key, doc)
         return doc

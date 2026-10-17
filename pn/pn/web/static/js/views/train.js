@@ -320,7 +320,7 @@ function playView(initial, onNewSession) {
       onPick: (i) => { viewDec = i; drawFeedback(decisions()); } });
     gridCtl = out.grid;
     fbPanel.replaceChildren(...out.nodes);
-    const ranges = rangesPanel(decs[sel], state.hero.cards);
+    const ranges = rangesPanel(decs[sel], state.hero.cards, { sid: state.sid, hand: state.hand_no });
     rangesHolder.replaceChildren(...(ranges ? [ranges] : []));
   }
 

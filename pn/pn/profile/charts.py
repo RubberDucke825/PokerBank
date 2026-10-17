@@ -141,6 +141,7 @@ def _pc_key(table: str, action: str, pos: str, other: str | None,
         "call_3bet": f"call {pos} vs3bet {vs}",
         "3bet_limp_vs_raise": f"3bet {pos} limp_vs_raise {vs}",
         "call_limp_vs_raise": f"call {pos} limp_vs_raise {vs}",
+        "3bet_value_limp_vs_raise": f"3bet_value {pos} limp_vs_raise {vs}",  # bots' SB limps
     }.get(action)
 
 

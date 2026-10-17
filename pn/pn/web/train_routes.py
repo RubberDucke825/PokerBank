@@ -18,6 +18,7 @@ from pn.train import Config, SessionNotFound, Trainer, TrainError, performance
 from pn.train import importance as imp
 from pn.train import stats as train_stats
 from pn.train.leaks import Leaks
+from pn.train.preflop_line import preflop_line
 from pn.web.solves import with_board
 from pn.web.store import NotFound, Store
 
@@ -49,10 +50,10 @@ def trainer(request: Request) -> Trainer:
     if getattr(state, "trainer", None) is None:
         store, registry = state.store, state.registry
 
-        def register(doc: dict, req: SpotRequest) -> str:
+        def register(doc: dict, req: SpotRequest, parent: dict | None) -> str:
             name = f"train-{req.street}-{''.join(req.board)}-{uuid.uuid4().hex[:6]}"
             return registry.register(name, with_board(doc, req.board), "trainer street solve",
-                                     req=req)  # fmt: skip
+                                     req=req, parent=parent)  # fmt: skip
 
         leaks = Leaks(store.db_path, cache_root=cache_dir())
         threading.Thread(target=leaks.warm, name="leaks-warm", daemon=True).start()
@@ -221,6 +222,22 @@ def _perf_call(request: Request, fn, window: str, table: str, depth: str, since:
 @router.get("/api/train/{sid}")
 def train_state(sid: str, request: Request) -> dict:
     return _call(trainer(request).state, sid)
+
+
+@router.get("/api/train/{sid}/preflop_line")
+def train_preflop_line(sid: str, request: Request) -> dict:
+    """Preflop range split at each decision of the current hand's two flop players
+    (pn.train.preflop_line); {"steps": []} unless the hand reached a heads-up flop."""
+    t = trainer(request)
+
+    def build() -> dict:
+        s = t.get(sid)
+        with s.lock:
+            h, cfg = s.hand, s.cfg
+        hero = next(i for i, p in enumerate(h.players) if p.hero)
+        return preflop_line(h.state, h.tokens, hero, cfg.table_kind, cfg.depth, t.freqs)
+
+    return _call(build)
 
 
 @router.post("/api/train/{sid}/act")

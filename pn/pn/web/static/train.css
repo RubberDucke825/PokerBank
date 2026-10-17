@@ -311,3 +311,20 @@ kbd.kbd-soft { padding: 2px 5px; font-size: var(--text-2xs); background: var(--b
 .tr-range:first-child .tr-range-who { color: var(--ink-2); }
 .tr-range-stats { color: var(--ink-3); }
 .tr-range-stats b { color: var(--accent); font-weight: 400; }
+.tr-modes .seg-opt { text-transform: none; letter-spacing: 0.02em; }
+.tr-line-view { display: flex; flex-direction: column; gap: var(--s3); }
+.tr-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font: 400 var(--text-xs) var(--font-mono); }
+.tr-steps li + li::before { content: "·"; color: var(--ink-4); margin-right: 4px; }
+.tr-step { min-height: 32px; padding: 0.25rem 0.55rem; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2); color: var(--ink-2); font: inherit; cursor: pointer; }
+.tr-step:hover { color: var(--ink); background: var(--bg-3); }
+.tr-step[aria-pressed="true"] { border-color: var(--accent); color: var(--ink); background: var(--accent-soft); }
+.tr-step:active { transform: translateY(1px); }
+.tr-range.is-sel .tr-range-who { color: var(--accent); }
+.tr-range-none { justify-content: center; min-height: 6rem; border: 1px dashed var(--line); border-radius: var(--radius); padding: var(--s3); }
+/* action-split cells carry their own colour (black = not in range): white names in both themes */
+:root .tr-ranges .grid13.gw.tr-line { --gw-ink: #fff; --gw-halo: 0 0 2px rgb(0 0 0 / 0.85), 0 1px 2px rgb(0 0 0 / 0.6); }
+.tr-legend { gap: var(--s2) var(--s4); font-size: var(--text-xs); }
+.tr-legend li.is-taken { color: var(--ink); font-weight: 600; outline: 1px solid var(--ink-3); outline-offset: 2px; border-radius: 2px; }
+.swatch.tr-out { background: #000; box-shadow: 0 0 0 1px var(--line-2); }
+@media (max-width: 700px) { .tr-step { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .tr-step:active { transform: none; } }

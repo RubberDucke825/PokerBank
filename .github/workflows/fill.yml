@@ -65,7 +65,7 @@ jobs:
           openssl enc -d -aes-256-cbc -pbkdf2 -pass env:FILL_KEY -in seed.tgz.enc | tar xz
           rm seed.tgz.enc
           mkdir -p data/solves/cache && touch .seeded
-          echo "seeded: $(ls data/solves/cache/*.json 2>/dev/null | wc -l) documents"
+          echo "seeded: $(find data/solves/cache -maxdepth 1 \( -name '*.json' -o -name '*.json.gz' \) | wc -l) documents"
 
       - name: solve
         env:
@@ -79,7 +79,7 @@ jobs:
       - name: pack new documents
         run: |
           cd data/solves/cache
-          find . -maxdepth 1 -newer ../../../.seeded \( -name '*.json' -o -name '*.toml' \) \
+          find . -maxdepth 1 -newer ../../../.seeded \( -name '*.json' -o -name '*.json.gz' -o -name '*.toml' \) \
             ! -name 'hu_flop_library.json' ! -name '.*' > ../../../new.txt
           echo "$(wc -l < ../../../new.txt) new files"
           tar cz -T ../../../new.txt | openssl enc -aes-256-cbc -pbkdf2 -pass env:FILL_KEY \
